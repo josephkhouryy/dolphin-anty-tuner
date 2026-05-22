@@ -69,8 +69,5 @@ $logPath = Join-Path $workDir 'tune.log'
 Set-Content -Path $logPath -Value '' -Force
 
 Start-ScheduledTask -TaskName $taskName
-
 Start-Sleep -Seconds 3
-Get-ScheduledTaskInfo -TaskName $taskName | Format-List TaskName, LastRunTime, NextRunTime, LastTaskResult, NumberOfMissedRuns
-Write-Output ("Registered + started " + $taskName + ", maxIters=" + $MaxIters)
-Write-Output ("Log: " + $logPath)
+Get-ScheduledTaskInfo -TaskName $taskName | Format-List TaskName, LastRunTime, NextRunTime, LastTaskResult
