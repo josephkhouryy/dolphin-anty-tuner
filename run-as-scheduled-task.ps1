@@ -1,6 +1,6 @@
-# run-as-scheduled-task.ps1 — Run tune.js inside a Windows Scheduled Task so
+# run-as-scheduled-task.ps1 -- Run tune.js inside a Windows Scheduled Task so
 # it survives SSH disconnect (Windows OpenSSH kills its session's whole job
-# tree on exit, even Node `detached:true` children — Scheduled Tasks run in a
+# tree on exit, even Node `detached:true` children -- Scheduled Tasks run in a
 # separate session and escape this).
 #
 # Usage (from inside this folder):
@@ -9,7 +9,7 @@
 #   .\run-as-scheduled-task.ps1 -Stop           # cancel a running task
 #
 # Output:
-#   tune.log inside this folder — refreshed each launch.
+#   tune.log inside this folder -- refreshed each launch.
 #   The task is named 'DolphinAntyTuner'.
 
 param(
@@ -58,7 +58,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description "Dolphin Anty fingerprint tuner — runs tune.js once; max $MaxIters iterations" | Out-Null
+    -Description "Dolphin Anty fingerprint tuner -- runs tune.js once; max $MaxIters iterations" | Out-Null
 
 # Pass MAX_ITERATIONS to the task. The Settings API doesn't accept env vars
 # directly, so we set it system-wide for THIS user before triggering.
