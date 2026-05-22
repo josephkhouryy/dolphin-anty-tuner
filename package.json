@@ -1,0 +1,20 @@
+{
+  "name": "dolphin-anty-tuner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Iteratively tune Dolphin Anty fingerprint configs against fingerprint.com + CreepJS until a winning profile is found.",
+  "main": "tune.js",
+  "scripts": {
+    "smoke": "node smoke.js",
+    "tune": "node tune.js",
+    "finalize": "node finalize.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "axios-cookiejar-support": "^5.0.5",
+    "dotenv": "^16.4.5",
+    "https-proxy-agent": "^7.0.5",
+    "playwright": "^1.49.0",
+    "tough-cookie": "^5.0.0"
+  }
+}
