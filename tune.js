@@ -38,9 +38,10 @@ const { bench } = require('./bench');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const MAX_ITERATIONS = parseInt(process.env.TUNER_MAX_ITERATIONS || '40', 10);
-const TARGET_SCORE   = parseInt(process.env.TUNER_TARGET_SCORE   || '90', 10);
-const STREAK_TO_STOP = parseInt(process.env.TUNER_STREAK_TO_STOP || '3', 10);
+const MAX_ITERATIONS    = parseInt(process.env.TUNER_MAX_ITERATIONS    || '40', 10);
+const TARGET_SCORE      = parseInt(process.env.TUNER_TARGET_SCORE      || '90', 10);   // stop the loop when this is hit
+const PUBLISH_THRESHOLD = parseInt(process.env.TUNER_PUBLISH_THRESHOLD || '80', 10);   // write to output/ when this is hit
+const STREAK_TO_STOP    = parseInt(process.env.TUNER_STREAK_TO_STOP    || '3', 10);
 const DATA_DIR     = path.join(__dirname, 'data');
 const OUTPUT_DIR   = path.join(__dirname, 'output');
 const HISTORY_FILE = path.join(DATA_DIR, 'tuning-history.jsonl');
@@ -232,7 +233,7 @@ async function runOnce({ payload, label, knob, value }) {
   // downstream subprojects (Hotmail Multi Creator) can re-create the same
   // profile on demand. We delete the Dolphin profile (free tier caps at 20)
   // but keep the recipe — Hotmail just calls createProfile(payload).
-  if (result.score.total >= TARGET_SCORE) {
+  if (result.score.total >= PUBLISH_THRESHOLD) {
     try {
       const file = persistGoodProfile({ dolphinProfileId: profileId, ip, score: result.score, payload });
       console.log(`⭐  Persisted good profile to ${file}`);
