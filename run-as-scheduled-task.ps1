@@ -13,21 +13,25 @@ param(
   [switch]$Stop
 )
 
-$ErrorActionPreference = 'Stop'
 $taskName = 'DolphinAntyTuner'
 $workDir  = $PSScriptRoot
 $logPath  = Join-Path $workDir 'tune.log'
 
+function Silent-Schtasks {
+  param([string[]]$args)
+  try { & schtasks.exe @args *>&1 | Out-Null } catch {}
+}
+
 if ($Stop) {
-  & schtasks /End    /TN $taskName 2>$null | Out-Null
-  & schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+  Silent-Schtasks @('/End','/TN', $taskName)
+  Silent-Schtasks @('/Delete','/TN', $taskName, '/F')
   Write-Output "Stopped and removed $taskName"
   return
 }
 
 # Clear any prior copy
-& schtasks /End    /TN $taskName 2>$null | Out-Null
-& schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+Silent-Schtasks @('/End','/TN', $taskName)
+Silent-Schtasks @('/Delete','/TN', $taskName, '/F')
 
 # Reset the log
 Set-Content -Path $logPath -Value '' -Force
