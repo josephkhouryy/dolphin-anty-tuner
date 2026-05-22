@@ -45,9 +45,28 @@ const DATA_DIR     = path.join(__dirname, 'data');
 const OUTPUT_DIR   = path.join(__dirname, 'output');
 const HISTORY_FILE = path.join(DATA_DIR, 'tuning-history.jsonl');
 const BEST_FILE    = path.join(DATA_DIR, 'best-config.json');
+const LOG_FILE     = path.join(__dirname, 'tune.log');
 
 fs.mkdirSync(DATA_DIR,   { recursive: true });
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
+// ─── Tee stdout/stderr to tune.log (synchronous fs.appendFile) ───────────────
+// Background-launched processes on Windows (Scheduled Task, WMI) often have
+// null stdio handles — console.log goes nowhere. We mirror every log line to a
+// file so progress is observable regardless of how the process was started.
+(() => {
+  try { fs.writeFileSync(LOG_FILE, ''); } catch {}                      // truncate at start
+  const origLog = console.log.bind(console);
+  const origErr = console.error.bind(console);
+  const teeWrite = (args, prefix = '') => {
+    try {
+      fs.appendFileSync(LOG_FILE, prefix + args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ') + '\n');
+    } catch {}
+  };
+  console.log   = (...a) => { origLog(...a); teeWrite(a); };
+  console.warn  = (...a) => { origErr(...a); teeWrite(a, '[warn] '); };
+  console.error = (...a) => { origErr(...a); teeWrite(a, '[err] '); };
+})();
 
 /**
  * Persist a profile that scored above the target into output/ so downstream
