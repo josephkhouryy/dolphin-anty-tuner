@@ -36,23 +36,22 @@ Silent-Schtasks @('/Delete','/TN', $taskName, '/F')
 # Reset the log
 Set-Content -Path $logPath -Value '' -Force
 
-# We persist MAX_ITERATIONS into a per-user env var so the task picks it up via
-# tune.js's process.env (dotenv override:true does not clobber existing env vars
-# if .env does not define this key).
-[Environment]::SetEnvironmentVariable('TUNER_MAX_ITERATIONS', "$MaxIters", 'User')
-
-# Build the command. We wrap in cmd /c so we can set TUNER_MAX_ITERATIONS in the
-# task's session too (User env vars do not always propagate to schtasks
-# children). Output goes to tune.log via tune.js's own tee logger.
+# Write a tiny .cmd launcher so schtasks doesn't have to parse the command line.
+$cmdLauncher = Join-Path $workDir 'tuner-task.cmd'
 $nodeExe = (Get-Command node.exe).Source
-$cmd = "cmd /c `"set TUNER_MAX_ITERATIONS=$MaxIters && cd /d $workDir && `"$nodeExe`" tune.js`""
+@"
+@echo off
+cd /d "$workDir"
+set TUNER_MAX_ITERATIONS=$MaxIters
+"$nodeExe" tune.js
+"@ | Set-Content -Path $cmdLauncher -Encoding ASCII -Force
 
 # /SC ONCE   -- one-shot trigger
 # /ST 00:00  -- placeholder time; we trigger immediately below with /Run
 # /SD distant date so the trigger never re-fires
 # /RL HIGHEST -- run elevated
 # /F  -- overwrite without prompting
-& schtasks /Create /TN $taskName /TR $cmd /SC ONCE /ST 00:00 /SD 01/01/2099 /RL HIGHEST /F | Out-Null
+& schtasks /Create /TN $taskName /TR $cmdLauncher /SC ONCE /ST 00:00 /SD 01/01/2099 /RL HIGHEST /F | Out-Null
 
 # Trigger it
 & schtasks /Run /TN $taskName | Out-Null
