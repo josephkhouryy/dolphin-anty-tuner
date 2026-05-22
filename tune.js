@@ -41,11 +41,34 @@ const { bench } = require('./bench');
 const MAX_ITERATIONS = parseInt(process.env.TUNER_MAX_ITERATIONS || '40', 10);
 const TARGET_SCORE   = parseInt(process.env.TUNER_TARGET_SCORE   || '90', 10);
 const STREAK_TO_STOP = parseInt(process.env.TUNER_STREAK_TO_STOP || '3', 10);
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR     = path.join(__dirname, 'data');
+const OUTPUT_DIR   = path.join(__dirname, 'output');
 const HISTORY_FILE = path.join(DATA_DIR, 'tuning-history.jsonl');
 const BEST_FILE    = path.join(DATA_DIR, 'best-config.json');
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(DATA_DIR,   { recursive: true });
+fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
+/**
+ * Persist a profile that scored above the target into output/ so downstream
+ * subprojects (Hotmail Multi Creator → Twilio Multi Account Creator) can read it.
+ * Filename includes the score so newest-first + best-first sort cleanly.
+ */
+function persistGoodProfile({ dolphinProfileId, ip, score, payload }) {
+  const safeScore = String(score.total).padStart(3, '0');
+  const file = path.join(OUTPUT_DIR, `${dolphinProfileId}__score${safeScore}.json`);
+  const record = {
+    dolphin_profile_id: dolphinProfileId,
+    ip,
+    score: score.total,
+    suspect_score: score.suspect_score,
+    signals: score.signals,
+    validated_at: new Date().toISOString(),
+    payload,
+  };
+  fs.writeFileSync(file, JSON.stringify(record, null, 2));
+  return file;
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -139,6 +162,19 @@ async function runOnce({ payload, label, knob, value }) {
   } finally {
     try { await stopProfile(profileId); } catch {}
     try { await deleteProfile(profileId); } catch {}
+  }
+
+  // If the candidate scored above target, persist its payload to output/ so
+  // downstream subprojects (Hotmail Multi Creator) can re-create the same
+  // profile on demand. We delete the Dolphin profile (free tier caps at 20)
+  // but keep the recipe — Hotmail just calls createProfile(payload).
+  if (result.score.total >= TARGET_SCORE) {
+    try {
+      const file = persistGoodProfile({ dolphinProfileId: profileId, ip, score: result.score, payload });
+      console.log(`⭐  Persisted good profile to ${file}`);
+    } catch (e) {
+      console.warn(`     ! failed to persist good profile: ${e.message}`);
+    }
   }
 
   appendHistory({
