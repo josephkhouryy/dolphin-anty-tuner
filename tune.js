@@ -72,10 +72,17 @@ fs.mkdirSync(OUTPUT_DIR, { recursive: true });
  * Persist a profile that scored above the target into output/ so downstream
  * subprojects (Hotmail Multi Creator → Twilio Multi Account Creator) can read it.
  * Filename includes the score so newest-first + best-first sort cleanly.
+ *
+ * Per CLAUDE.md "Filesystem as message bus": each artifact is one file in
+ * output/, AND one row in output/index.jsonl (so siblings can read the pool
+ * via a single tail without globbing N JSON files).
  */
+const INDEX_FILE = path.join(__dirname, 'output', 'index.jsonl');
+
 function persistGoodProfile({ dolphinProfileId, ip, score, payload }) {
   const safeScore = String(score.total).padStart(3, '0');
-  const file = path.join(OUTPUT_DIR, `${dolphinProfileId}__score${safeScore}.json`);
+  const filename = `${dolphinProfileId}__score${safeScore}.json`;
+  const file = path.join(OUTPUT_DIR, filename);
   const record = {
     dolphin_profile_id: dolphinProfileId,
     ip,
@@ -86,8 +93,46 @@ function persistGoodProfile({ dolphinProfileId, ip, score, payload }) {
     payload,
   };
   fs.writeFileSync(file, JSON.stringify(record, null, 2));
+
+  // One-line summary appended to output/index.jsonl for cheap downstream tails
+  const indexRow = {
+    file: filename,
+    dolphin_profile_id: dolphinProfileId,
+    ip,
+    score: score.total,
+    suspect_score: score.suspect_score,
+    flagged_signals: Object.entries(score.signals || {}).filter(([, v]) => v === true).map(([k]) => k),
+    validated_at: record.validated_at,
+  };
+  try { fs.appendFileSync(INDEX_FILE, JSON.stringify(indexRow) + '\n'); } catch {}
   return file;
 }
+
+/**
+ * Rebuild output/index.jsonl from the actual files in output/. Idempotent — safe
+ * to run at startup so the index never gets out of sync with the disk truth.
+ */
+function rebuildOutputIndex() {
+  const entries = [];
+  for (const name of fs.readdirSync(OUTPUT_DIR)) {
+    if (!name.endsWith('.json') || name === 'index.jsonl') continue;
+    try {
+      const r = JSON.parse(fs.readFileSync(path.join(OUTPUT_DIR, name), 'utf-8'));
+      entries.push({
+        file: name,
+        dolphin_profile_id: r.dolphin_profile_id,
+        ip: r.ip,
+        score: r.score,
+        suspect_score: r.suspect_score,
+        flagged_signals: Object.entries(r.signals || {}).filter(([, v]) => v === true).map(([k]) => k),
+        validated_at: r.validated_at,
+      });
+    } catch {}
+  }
+  entries.sort((a, b) => (a.validated_at || '').localeCompare(b.validated_at || ''));
+  fs.writeFileSync(INDEX_FILE, entries.map(e => JSON.stringify(e)).join('\n') + (entries.length ? '\n' : ''));
+}
+rebuildOutputIndex();
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
