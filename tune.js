@@ -147,10 +147,9 @@ async function runOnce({ payload, label, knob, value }) {
     score: result.score,
     probe: summarizeProbe(result.probe),
     extracted: {
-      fingerprintCom: result.results?.fingerprint_com?.extracted,
-      creepjs: result.results?.creepjs?.extracted,
-      browserleaks: result.results?.browserleaks_bot?.extracted,
-      pixelscan: result.results?.pixelscan?.extracted,
+      playgroundSignals: result.results?.fp_playground?.signals,
+      playgroundPayload: result.results?.fp_playground?.payload,
+      fingerprintComPayload: result.results?.fingerprint_com?.payload,
     },
   });
 
