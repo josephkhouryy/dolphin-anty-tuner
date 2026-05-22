@@ -70,10 +70,7 @@ Set-Content -Path $logPath -Value '' -Force
 
 Start-ScheduledTask -TaskName $taskName
 
-# Wait briefly and report
 Start-Sleep -Seconds 3
-$info = Get-ScheduledTaskInfo -TaskName $taskName
-Write-Host "Registered + started $taskName, maxIters=$MaxIters."
-Write-Host "  Last run time: $($info.LastRunTime)"
-Write-Host "  Next run time: $($info.NextRunTime)"
-Write-Host "  Log:           $logPath"
+Get-ScheduledTaskInfo -TaskName $taskName | Format-List TaskName, LastRunTime, NextRunTime, LastTaskResult, NumberOfMissedRuns
+Write-Output ("Registered + started " + $taskName + ", maxIters=" + $MaxIters)
+Write-Output ("Log: " + $logPath)
