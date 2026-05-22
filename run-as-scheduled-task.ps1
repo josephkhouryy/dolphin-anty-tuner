@@ -1,16 +1,12 @@
-# run-as-scheduled-task.ps1 -- Run tune.js inside a Windows Scheduled Task so
-# it survives SSH disconnect (Windows OpenSSH kills its session's whole job
-# tree on exit, even Node `detached:true` children -- Scheduled Tasks run in a
-# separate session and escape this).
+# run-as-scheduled-task.ps1 -- Launch tune.js inside a Windows Scheduled Task
+# (survives SSH disconnect; Windows OpenSSH kills the SSH session job tree on
+# exit, even Node detached children). Uses the classic schtasks.exe -- the
+# Register-ScheduledTask cmdlets refused to run under SSH for unclear reasons.
 #
-# Usage (from inside this folder):
+# Usage:
 #   .\run-as-scheduled-task.ps1                 # default 30 iterations
-#   .\run-as-scheduled-task.ps1 -MaxIters 20    # override
-#   .\run-as-scheduled-task.ps1 -Stop           # cancel a running task
-#
-# Output:
-#   tune.log inside this folder -- refreshed each launch.
-#   The task is named 'DolphinAntyTuner'.
+#   .\run-as-scheduled-task.ps1 -MaxIters 20
+#   .\run-as-scheduled-task.ps1 -Stop
 
 param(
   [int]$MaxIters = 30,
@@ -19,55 +15,44 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $taskName = 'DolphinAntyTuner'
-$workDir = $PSScriptRoot
+$workDir  = $PSScriptRoot
+$logPath  = Join-Path $workDir 'tune.log'
 
 if ($Stop) {
-  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-  Write-Host "Stopped + unregistered $taskName"
+  & schtasks /End    /TN $taskName 2>$null | Out-Null
+  & schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+  Write-Output "Stopped and removed $taskName"
   return
 }
 
-# Always start fresh
-Stop-ScheduledTask    -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
-Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-
-# tune.js tees console to tune.log itself; no extra wrapping needed.
-$nodeExe = (Get-Command node.exe -ErrorAction Stop).Source
-$action = New-ScheduledTaskAction `
-    -Execute $nodeExe `
-    -Argument 'tune.js' `
-    -WorkingDirectory $workDir
-
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5)
-
-$settings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable `
-    -ExecutionTimeLimit ([TimeSpan]::FromHours(4))
-
-$principal = New-ScheduledTaskPrincipal `
-    -UserId "$env:USERDOMAIN\$env:USERNAME" `
-    -LogonType Interactive `
-    -RunLevel Highest
-
-Register-ScheduledTask `
-    -TaskName $taskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Principal $principal `
-    -Description "Dolphin Anty fingerprint tuner -- runs tune.js once; max $MaxIters iterations" | Out-Null
-
-# Pass MAX_ITERATIONS to the task. The Settings API doesn't accept env vars
-# directly, so we set it system-wide for THIS user before triggering.
-[Environment]::SetEnvironmentVariable('TUNER_MAX_ITERATIONS', "$MaxIters", 'User')
+# Clear any prior copy
+& schtasks /End    /TN $taskName 2>$null | Out-Null
+& schtasks /Delete /TN $taskName /F 2>$null | Out-Null
 
 # Reset the log
-$logPath = Join-Path $workDir 'tune.log'
 Set-Content -Path $logPath -Value '' -Force
 
-Start-ScheduledTask -TaskName $taskName
+# We persist MAX_ITERATIONS into a per-user env var so the task picks it up via
+# tune.js's process.env (dotenv override:true does not clobber existing env vars
+# if .env does not define this key).
+[Environment]::SetEnvironmentVariable('TUNER_MAX_ITERATIONS', "$MaxIters", 'User')
+
+# Build the command. We wrap in cmd /c so we can set TUNER_MAX_ITERATIONS in the
+# task's session too (User env vars do not always propagate to schtasks
+# children). Output goes to tune.log via tune.js's own tee logger.
+$nodeExe = (Get-Command node.exe).Source
+$cmd = "cmd /c `"set TUNER_MAX_ITERATIONS=$MaxIters && cd /d $workDir && `"$nodeExe`" tune.js`""
+
+# /SC ONCE   -- one-shot trigger
+# /ST 00:00  -- placeholder time; we trigger immediately below with /Run
+# /SD distant date so the trigger never re-fires
+# /RL HIGHEST -- run elevated
+# /F  -- overwrite without prompting
+& schtasks /Create /TN $taskName /TR $cmd /SC ONCE /ST 00:00 /SD 01/01/2099 /RL HIGHEST /F | Out-Null
+
+# Trigger it
+& schtasks /Run /TN $taskName | Out-Null
+
 Start-Sleep -Seconds 3
-Get-ScheduledTaskInfo -TaskName $taskName | Format-List TaskName, LastRunTime, NextRunTime, LastTaskResult
+& schtasks /Query /TN $taskName /FO LIST /V | Select-String -Pattern 'TaskName|Status|Last Run Time|Last Result|Next Run Time'
+Write-Output "log: $logPath"
