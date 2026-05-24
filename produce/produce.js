@@ -20,6 +20,13 @@ const { isProfileUsedDownstream } = require('../lib/never-delete-guard');
 
 const MAX_ATTEMPTS    = parseInt(process.env.PRODUCE_MAX_ATTEMPTS || '0', 10);   // 0 = run forever
 const SUMMARY_EVERY   = parseInt(process.env.PRODUCE_SUMMARY_EVERY || '25', 10);
+// Delay between iterations when the previous one errored (IPRoyal down, Dolphin
+// API hiccup, etc.). Without this a hard outage produces a tight retry loop
+// that fills log.jsonl with thousands of error rows and risks a rate-limit
+// ban upstream. 5s is short enough to recover quickly when the outage clears.
+const ERROR_BACKOFF_MS = parseInt(process.env.PRODUCE_ERROR_BACKOFF_MS || '5000', 10);
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 const SUBPROJECT_ROOT = path.resolve(__dirname, '..');
 const OUTPUT_DIR      = path.join(SUBPROJECT_ROOT, 'output');
@@ -102,7 +109,11 @@ function writeSummary() {
   const hits = rows.filter(r => r.pass_all).length;
   const successRate = total ? (hits / total * 100).toFixed(1) : '0.0';
 
-  // Per-judge failure counts.
+  // Per-judge failure counts. Denominator excludes iterations that errored
+  // out before reaching bench -- those don't have a `judges` field. Reporting
+  // against `total` would understate the real failure rate among iterations
+  // that actually ran.
+  const benchedTotal = rows.filter(r => r.judges).length;
   const judgeFailCounts = {};
   for (const r of rows) {
     for (const [id, j] of Object.entries(r.judges || {})) {
@@ -111,7 +122,7 @@ function writeSummary() {
   }
   const judgeFailTable = Object.entries(judgeFailCounts)
     .sort(([, a], [, b]) => b - a)
-    .map(([id, c]) => `- ${id}: ${c} (${(c / total * 100).toFixed(1)}%)`)
+    .map(([id, c]) => `- ${id}: ${c} (${benchedTotal ? (c / benchedTotal * 100).toFixed(1) : '0.0'}% of benched)`)
     .join('\n') || '(none yet)';
 
   // Most common fp.com signals flagged.
@@ -282,6 +293,12 @@ async function main() {
     if (r.pass_all) hits += 1;
     if (iter % SUMMARY_EVERY === 0 || r.pass_all) writeSummary();
     console.log(`progress: iter=${iter}  hits=${hits}  rate=${(hits / iter * 100).toFixed(1)}%`);
+    // Back off when this iteration errored out (rotation, baseline, create,
+    // bench). Prevents a hard upstream outage from burning through iterations.
+    if (r.error && ERROR_BACKOFF_MS > 0) {
+      console.log(`(error backoff: sleeping ${ERROR_BACKOFF_MS}ms before next iter)`);
+      await sleep(ERROR_BACKOFF_MS);
+    }
   }
 
   writeSummary();
