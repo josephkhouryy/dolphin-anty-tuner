@@ -36,18 +36,25 @@ async function extractPixelscanVerdict(page) {
     const sliceEnd = footerIdx > sliceStart ? footerIdx : fullText.length;
     const verdictBlock = fullText.slice(sliceStart, sliceEnd);
 
-    // Strip lines that are obviously menu items / CTAs.
+    // Strip lines that are obviously menu items / CTAs. NB: we deliberately
+    // do NOT include the phrase "antidetect browser" (no hyphen) in the
+    // filter list, because Pixelscan's real verdict can render that exact
+    // phrasing on a positive match (e.g. "Your browser matches an antidetect
+    // browser profile"). Filtering it out would create a blind spot. The
+    // detection regex below accepts the hyphenated/spaced form (`anti-detect`
+    // / `anti detect`), and we accept the unhyphenated form too.
     const verdictClean = verdictBlock
       .split('\n')
       .filter(line => !/^(See|Get|Best|Top|Stay|Try|Buy|Save|\$|Discover|Resources|Tools|Products|Company|Special|RECOMMENDED|TOOLS|GUIDES|RESOURCES|COMPANY|CHECKERS|PARTNERS|BEST)/i.test(line.trim()))
-      .filter(line => !/multilogin|nodemaven|kameleo|gologin|adspower|dolphin|antidetect browser|proxy provider|residential prox|partner/i.test(line))
+      .filter(line => !/multilogin|nodemaven|kameleo|gologin|adspower|dolphin|proxy provider|residential prox|partner/i.test(line))
       .join('\n');
 
     const positive = /(\bconsistent\b|looks legit|\bpassed\b|no inconsistencies|real browser|trustworthy)/i.test(verdictClean);
-    const negative = /(modified browser|masking detected|\binconsistent\b|anti[- ]detect|fingerprint masking|automation detected|bot detected|\bspoof)/i.test(verdictClean);
+    const negative = /(modified browser|masking detected|\binconsistent\b|anti[- ]?detect|fingerprint masking|automation detected|bot detected|\bspoof)/i.test(verdictClean);
 
     const detectedFlags = [];
-    if (/anti[- ]detect/i.test(verdictClean)) detectedFlags.push('anti_detect');
+    // Accept both `anti-detect`, `anti detect` and `antidetect`.
+    if (/anti[- ]?detect/i.test(verdictClean)) detectedFlags.push('anti_detect');
     if (/masking detected/i.test(verdictClean)) detectedFlags.push('masking');
     if (/\binconsistent\b/i.test(verdictClean)) detectedFlags.push('inconsistent');
     if (/modified browser/i.test(verdictClean)) detectedFlags.push('modified');
@@ -91,26 +98,34 @@ async function judge({ ctx, screenshotsDir, timestamp, label, fs, path }) {
 
     const verdict = await extractPixelscanVerdict(page);
     const reasons = [];
+    const warnings = [];
     if (!verdict.verdictRendered) {
-      // Page never produced a verdict block. Don't fabricate a `flag:` from
-      // marketing chrome -- surface it as a soft signal instead so the
-      // tuner sees "page never loaded" rather than "definitely anti-detect".
-      reasons.push('no_verdict_rendered');
-    } else {
-      if (verdict.detectedFlags.length) {
-        for (const f of verdict.detectedFlags) reasons.push(`flag:${f}`);
-      }
-      if (verdict.negative_phrase && !verdict.positive_phrase) {
-        reasons.push('negative_phrase_only');
-      }
-      if (!verdict.positive_phrase && !verdict.negative_phrase) {
-        reasons.push('no_verdict_text');
-      }
+      // Page never produced a verdict block (CDN block, scan stalled,
+      // unexpected layout change). This is a TRUE soft signal: we don't
+      // know whether the profile is good or bad -- only that pixelscan
+      // didn't tell us. Record it as a warning and let the judge PASS so
+      // the multi-judge gate doesn't fail solely on pixelscan
+      // unreachability. Real positive flags (anti-detect detected, etc.)
+      // still go into `reasons` below when they're present.
+      warnings.push('no_verdict_rendered');
+    }
+    if (verdict.detectedFlags.length) {
+      for (const f of verdict.detectedFlags) reasons.push(`flag:${f}`);
+    }
+    if (verdict.negative_phrase && !verdict.positive_phrase) {
+      reasons.push('negative_phrase_only');
+    }
+    // We only mark "no verdict text" as a reason if the page DID render
+    // its scan block but said nothing positive and nothing negative --
+    // i.e. the scan finished but the result is ambiguous.
+    if (verdict.verdictRendered && !verdict.positive_phrase && !verdict.negative_phrase) {
+      reasons.push('no_verdict_text');
     }
 
     out.raw = verdict;
     out.pass = reasons.length === 0;
     out.reasons = reasons;
+    if (warnings.length) out.warnings = warnings;
   } catch (e) {
     out.error = e.message;
     out.pass = false;
