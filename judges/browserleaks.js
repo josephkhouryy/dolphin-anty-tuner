@@ -60,7 +60,7 @@ async function extractSubpageData(page, id) {
   }, id);
 }
 
-function judgeWebRTC(data, expectedProxyIp) {
+function judgeWebRTC(data, expectedProxyIp, opts = {}) {
   if (!data) return ['webrtc:no_data'];
   const reasons = [];
   if (expectedProxyIp) {
@@ -69,7 +69,15 @@ function judgeWebRTC(data, expectedProxyIp) {
   } else {
     if ((data.publicIps || []).length > 1) reasons.push(`webrtc:multi_public_ip=${data.publicIps.length}`);
   }
-  if (data.localIps && data.localIps.length) reasons.push(`webrtc:local_leak=${data.localIps.slice(0, 2).join(',')}`);
+  // The bench machine (EC2) always exposes its own VPC private IP via ICE
+  // candidates -- the caller can pass `allowedLocalIps` (explicit list) or
+  // `skipLocalIpCheck=true` to suppress that always-on noise. Without either,
+  // any private-range leak still counts as a real signal (e.g. someone running
+  // bench from a residential router).
+  if (opts.skipLocalIpCheck) return reasons;
+  const allowedLocal = new Set(opts.allowedLocalIps || []);
+  const surprising = (data.localIps || []).filter(ip => !allowedLocal.has(ip));
+  if (surprising.length) reasons.push(`webrtc:local_leak=${surprising.slice(0, 2).join(',')}`);
   return reasons;
 }
 
@@ -100,9 +108,16 @@ function judgeFonts(data) {
   return [];
 }
 
-async function judge({ ctx, screenshotsDir, timestamp, label, fs, path, expectedProxyIp = null, declaredOs = null }) {
+async function judge({
+  ctx, screenshotsDir, timestamp, label, fs, path,
+  expectedProxyIp = null,
+  declaredOs = null,
+  allowedLocalIps = null,
+  skipLocalIpCheck = false,
+}) {
   const out = { id: 'browserleaks', subpages: {} };
   const reasons = [];
+  const webrtcOpts = { allowedLocalIps, skipLocalIpCheck };
 
   for (const sub of SUBPAGES) {
     const page = await ctx.newPage();
@@ -114,7 +129,7 @@ async function judge({ ctx, screenshotsDir, timestamp, label, fs, path, expected
       await page.screenshot({ path: shot, fullPage: true }).catch(() => {});
       sout.screenshot = shot;
       sout.data = await extractSubpageData(page, sub.id);
-      if (sub.id === 'webrtc') reasons.push(...judgeWebRTC(sout.data, expectedProxyIp));
+      if (sub.id === 'webrtc') reasons.push(...judgeWebRTC(sout.data, expectedProxyIp, webrtcOpts));
       else if (sub.id === 'webgl') reasons.push(...judgeWebGL(sout.data, declaredOs));
       else if (sub.id === 'canvas') reasons.push(...judgeCanvas(sout.data));
       else if (sub.id === 'fonts') reasons.push(...judgeFonts(sout.data));

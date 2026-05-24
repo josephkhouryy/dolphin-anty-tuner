@@ -93,7 +93,16 @@ function legacyScoreFromFp(fpResult) {
   };
 }
 
-async function bench({ cdpPort, profileId, label = 'unknown', visionConfig = null, expectedProxyIp = null, declaredOs = null }) {
+async function bench({
+  cdpPort,
+  profileId,
+  label = 'unknown',
+  visionConfig = null,
+  expectedProxyIp = null,
+  declaredOs = null,
+  allowedLocalIps = null,
+  skipLocalIpCheck = false,
+}) {
   const wsBase = `http://127.0.0.1:${cdpPort}`;
   console.log(`Connecting to CDP at ${wsBase} ...`);
   const browser = await chromium.connectOverCDP(wsBase);
@@ -109,6 +118,7 @@ async function bench({ cdpPort, profileId, label = 'unknown', visionConfig = nul
     judges[j.id] = await j.mod.judge({
       ctx, screenshotsDir, timestamp, label, fs, path,
       expectedProxyIp, declaredOs,
+      allowedLocalIps, skipLocalIpCheck,
     });
     const verdict = judges[j.id].pass ? 'PASS' : 'FAIL';
     const reasons = judges[j.id].reasons || [];
@@ -167,11 +177,18 @@ if (require.main === module) {
   const label = process.argv[4] || 'manual-run';
   const expectedProxyIp = process.argv[5] || null;
   const declaredOs = process.argv[6] || null;
+  // Allow the bench-machine VPC private IP via env so the WebRTC local-IP
+  // check doesn't trip on the host's own ICE candidate. Use a comma-separated
+  // list or set BENCH_SKIP_LOCAL_IP_CHECK=1 to bypass entirely.
+  const allowedLocalIps = process.env.BENCH_ALLOWED_LOCAL_IPS
+    ? process.env.BENCH_ALLOWED_LOCAL_IPS.split(',').map(s => s.trim()).filter(Boolean)
+    : null;
+  const skipLocalIpCheck = process.env.BENCH_SKIP_LOCAL_IP_CHECK === '1';
   if (!cdpPort) {
     console.error('Usage: node bench.js <cdpPort> [profileId] [label] [expectedProxyIp] [declaredOs]');
     process.exit(1);
   }
-  bench({ cdpPort, profileId, label, expectedProxyIp, declaredOs })
+  bench({ cdpPort, profileId, label, expectedProxyIp, declaredOs, allowedLocalIps, skipLocalIpCheck })
     .then(() => process.exit(0))
     .catch(e => { console.error('ERROR:', e); process.exit(1); });
 }

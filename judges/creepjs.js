@@ -32,12 +32,24 @@ async function extractCreepjsVerdict(page) {
     const lies = liesMatch ? Number(liesMatch[1]) : null;
 
     // Bot/automation/headless tags surfaced in the result block.
+    // CreepJS prints each attribute as a labelled row even when the value is
+    // negative ("Headless Browser: Not Detected"), so bare-keyword regexes
+    // would flag every page. Only push a tag when the keyword appears with a
+    // positive-detection phrase in the same 80-char window AND no negation in
+    // that span.
     const automationTags = [];
-    if (/headless/i.test(text)) automationTags.push('headless');
-    if (/automation/i.test(text)) automationTags.push('automation');
-    if (/\bwebdriver\b/i.test(text)) automationTags.push('webdriver');
-    if (/puppet/i.test(text)) automationTags.push('puppeteer');
-    if (/playwright/i.test(text)) automationTags.push('playwright');
+    const positiveNear = (kw) => {
+      const m = text.match(new RegExp(`${kw}[^\\n]{0,80}`, 'i'));
+      if (!m) return false;
+      const span = m[0];
+      if (/not\s+detected|\bfalse\b|\bno\b|negative/i.test(span)) return false;
+      return /\btrue\b|\byes\b|\bdetected\b|positive/i.test(span);
+    };
+    if (positiveNear('headless')) automationTags.push('headless');
+    if (positiveNear('automation')) automationTags.push('automation');
+    if (positiveNear('webdriver')) automationTags.push('webdriver');
+    if (positiveNear('puppet')) automationTags.push('puppeteer');
+    if (positiveNear('playwright')) automationTags.push('playwright');
 
     // Fingerprint hash (informational).
     const fpHash = (text.match(/fingerprint\s*([0-9a-f]{12,})/i) || [])[1] || null;

@@ -27,11 +27,11 @@ async function extractFingerprintPayload(page) {
         const o = JSON.parse(b);
         if (looksLikeFpResponse(o)) return o;
       } catch {}
-      try {
-        const fn = new Function('return (' + b + ');');
-        const o = fn();
-        if (looksLikeFpResponse(o)) return o;
-      } catch {}
+      // Last resort: regex out the fields we care about. We do NOT fall through
+      // to `new Function(...)` on the raw blob -- that would run arbitrary page
+      // content in the browser context. JSON.parse above already covers every
+      // well-formed payload FP.com serves; the regex extraction below covers
+      // the rest without code execution.
       const out = {};
       const ss   = b.match(/suspect_score[^\d-]*(-?\d+(?:\.\d+)?)/);
       const adb  = b.match(/anti_detect_browser[^\w]*[:=]\s*(true|false)/);
