@@ -2,4 +2,7 @@
 node_modules/
 data/
 screenshots/
+experiments/
 *.log
+producer-task.cmd
+tuner-task.cmd

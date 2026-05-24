@@ -35,6 +35,7 @@ const {
 const { buildBaseline, mutate, candidateMoves, freshName } = require('./generate');
 const { rotateAndGetIP } = require('./iproyal');
 const { bench } = require('./bench');
+const { isProfileUsedDownstream } = require('./lib/never-delete-guard');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -160,8 +161,16 @@ async function cleanupStaleTunerProfiles() {
     const profiles = await listProfiles({ limit: 50 });
     const stale = profiles.filter(p => p?.name?.startsWith('tuner-') || (p?.tags || []).includes('tuner'));
     if (stale.length) {
-      console.log(`🧹  Deleting ${stale.length} stale tuner-* profile(s) from a previous run...`);
+      console.log(`🧹  Considering ${stale.length} stale tuner-* profile(s) for cleanup...`);
       for (const p of stale) {
+        // Never-delete-good-profile rule: any profile in use by Hotmail or
+        // Twilio downstream is precious and must survive cleanup. See
+        // lib/never-delete-guard.js.
+        const guard = isProfileUsedDownstream(p.id);
+        if (guard.used) {
+          console.log(`     - SKIP ${p.id} (${p.name}) — in use by ${guard.where}`);
+          continue;
+        }
         try { await deleteProfile(p.id); console.log(`     - deleted ${p.id} (${p.name})`); }
         catch (e) { console.warn(`     ! could not delete ${p.id}: ${e.message}`); }
       }
@@ -226,7 +235,16 @@ async function runOnce({ payload, label, knob, value }) {
     return { score: { total: -1, breakdown: {} }, error: e.message };
   } finally {
     try { await stopProfile(profileId); } catch {}
-    try { await deleteProfile(profileId); } catch {}
+    // Never-delete-good-profile guard: even though this is a fresh tuner-*
+    // profile from THIS iteration, a downstream session may have already
+    // consumed it before our finally{} runs (the ledger is append-only and
+    // visible cross-folder). Check before deleting.
+    const guard = isProfileUsedDownstream(profileId);
+    if (guard.used) {
+      console.log(`     guard: profile ${profileId} in use by ${guard.where}; skipping delete`);
+    } else {
+      try { await deleteProfile(profileId); } catch {}
+    }
   }
 
   // If the candidate scored above target, persist its payload to output/ so
