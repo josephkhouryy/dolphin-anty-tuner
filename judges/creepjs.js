@@ -47,7 +47,11 @@ async function extractCreepjsVerdict(page) {
       let m;
       while ((m = re.exec(text)) !== null) {
         const span = m[0];
-        if (/not\s+detected|\bfalse\b|\bno\b|negative/i.test(span)) continue;
+        // `\bnot\b` (not bare `\bno\b`) -- "no" matches incidentally on text
+        // like "No other automation flags" which sits well past the actual
+        // verdict and would silently swallow a real detection. `\bnot\b` still
+        // catches "not detected" / "not headless" without that false drop.
+        if (/not\s+detected|\bfalse\b|\bnot\b|negative/i.test(span)) continue;
         if (/\btrue\b|\byes\b|\bdetected\b|positive/i.test(span)) return true;
       }
       return false;
