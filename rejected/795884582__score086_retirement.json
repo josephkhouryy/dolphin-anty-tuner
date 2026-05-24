@@ -1,6 +1,6 @@
 {
   "retired_file": "795884582__score086.json",
-  "dolphin_profile_id": "795884582",
+  "dolphin_profile_id": 795884582,
   "ip": "<see retired_file>",
   "retired_at": "2026-05-24T00:00:00Z",
   "reason": "Predates the multi-judge strict gate; produced when fp.com was the only judge and suspect_score=14 was acceptable. New gate requires suspect_score=0 AND clean verdicts from CreepJS, Pixelscan, bot.sannysoft, and browserleaks -- none of which this profile was tested against.",
