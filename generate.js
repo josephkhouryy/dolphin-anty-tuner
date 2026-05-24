@@ -113,6 +113,14 @@ async function buildBaseline({ name = `tuner-${Date.now()}`, sessionLabel, os } 
 
   const screenResolution = `${fp.screen?.width || 1920}x${fp.screen?.height || 1080}`;
 
+  // Force consistency between UA and cpuArchitecture. Dolphin's macOS UA is
+  // "Intel Mac OS X 10_15_7" (Apple's UA reduction default for Chrome) but
+  // Dolphin's fingerprint sometimes returns cpu.architecture='arm' on
+  // M-series presets. Intel UA + arm cpu is a tell -- fp.com flags vm=true.
+  // Pin to x86 when the UA explicitly says "Intel Mac".
+  let cpuArch = fp.cpu?.architecture || defaultCpuArchFor(targetOs);
+  if (/Intel Mac OS X/i.test(fp.userAgent || '')) cpuArch = 'x86';
+
   return {
     name,
     tags: ['tuner'],
@@ -123,7 +131,7 @@ async function buildBaseline({ name = `tuner-${Date.now()}`, sessionLabel, os } 
     // ─── Identity ─────────────────────────────────────
     useragent: { mode: 'manual', value: fp.userAgent },
     platformName: fp.platform || defaultPlatformNameFor(targetOs),
-    cpuArchitecture: fp.cpu?.architecture || defaultCpuArchFor(targetOs),
+    cpuArchitecture: cpuArch,
     osVersion: defaultOsVersionFor(targetOs, fp),
     vendor: fp.vendor || 'Google Inc.',
     vendorSub: fp.vendorSub ?? '',
