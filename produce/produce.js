@@ -236,14 +236,22 @@ async function runOnce(iter) {
       .filter(([, v]) => v === true).map(([k]) => k);
 
     if (benchResult.pass_all) {
-      const file = persistGoodProfile({
-        dolphinProfileId: profileId,
-        ip,
-        judges: benchResult.judges,
-        score: benchResult.score,
-        payload,
-      });
-      console.log(`PUBLISHED ${file}`);
+      // A disk-full / permissions error on persist must NOT kill the forever
+      // loop. Log and keep going -- the bench result still went to log.jsonl
+      // so we have the data even when output/ couldn't be written.
+      try {
+        const file = persistGoodProfile({
+          dolphinProfileId: profileId,
+          ip,
+          judges: benchResult.judges,
+          score: benchResult.score,
+          payload,
+        });
+        console.log(`PUBLISHED ${file}`);
+      } catch (e) {
+        console.error(`persistGoodProfile failed: ${e.message}`);
+        attempt.persist_error = e.message;
+      }
     } else {
       console.log(`failing=[${benchResult.failing.join(',')}]`);
     }
