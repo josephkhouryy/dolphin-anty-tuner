@@ -15,8 +15,10 @@ Joe greenlit three changes:
 TARGET_SCORE=90 (loop's convergence stopping signal) -- not yet reached.
 PUBLISH_THRESHOLD=80 (write to output/ at this score) -- lowered from 90 because the single-knob hill climb caps around 86 with only `vm` flagged. Downstream (Hotmail Multi Creator) tests whether 86 + vm is good enough for Microsoft -- if it gets rejected, we'll learn from `rejected/` and tighten.
 
+The continuous producer (`produce/produce.js`) honors `PRODUCE_PUBLISH_THRESHOLD` (default 80) and publishes on legacy-score gate alone. `pass_all` (all 5 judges) is now recorded in the artifact for downstream's information but NOT a hard publication gate -- the non-fp judges (CreepJS, Pixelscan, sannysoft, browserleaks) fail for proxy-network reasons (ERR_CONNECTION_CLOSED on the residential proxy) that don't reflect profile quality, so gating on pass_all kept the pool dry. Downstream consumers can pick by `pass_all=true` first if they want the strictest profiles.
+
 ## Next-run plan
-Restart with the new code (PUBLISH_THRESHOLD support + index.jsonl writes). Same 30-iter budget. Each iteration that scores >=80 publishes to output/ -- building the pool while still trying to crack the 90 ceiling.
+Restart with the new code (publish-at-threshold + parent-events). Each iteration that scores >=80 publishes to output/ -- the pool should fill from the first FP-clean iteration on. Continuous loop runs until upstream IP pool is exhausted or Joe stops it.
 
 ## Known blockers / open problems
 - **virtual_machine signal**: FP.com's VM detection trips on EC2 hardware (likely WebGL2Maximum constants or specific D3D11 vendor signature). Likely irreducible from inside Dolphin's config knob set.
