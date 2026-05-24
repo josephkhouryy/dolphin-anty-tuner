@@ -134,8 +134,13 @@ async function judge({ ctx, screenshotsDir, timestamp, label, fs, path }) {
       .filter(([, v]) => v === true)
       .map(([k]) => k);
 
+    // Mirror legacyScoreFromFp: prefer the DOM-scraped value but fall through
+    // to the JSON payload when the playground re-renders mid-scrape and the
+    // suspect-score line doesn't match. Otherwise we'd false-fail a clean
+    // profile whose payload.suspect_score=0 just because the DOM regex missed.
+    const ss = signals?.suspect_score ?? payload?.suspect_score ?? null;
     const reasons = [];
-    if (signals?.suspect_score !== 0) reasons.push(`suspect_score=${signals?.suspect_score ?? 'unknown'}`);
+    if (ss !== 0) reasons.push(`suspect_score=${ss ?? 'unknown'}`);
     if (anti_detect_browser === true) reasons.push('anti_detect_browser=true');
     for (const k of flagged) reasons.push(`signal:${k}`);
 

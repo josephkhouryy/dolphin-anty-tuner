@@ -34,12 +34,14 @@ async function extractCreepjsVerdict(page) {
     // Bot/automation/headless tags surfaced in the result block.
     // CreepJS prints each attribute as a labelled row even when the value is
     // negative ("Headless Browser: Not Detected"), so bare-keyword regexes
-    // would flag every page. Only push a tag when the keyword appears with a
-    // positive-detection phrase in the same 80-char window AND no negation in
-    // that span.
+    // would flag every page. We scan a 120-char window AFTER each keyword,
+    // crossing newlines, because innerText puts the label and the value on
+    // separate lines when they live in different DOM cells. A tag is pushed
+    // only when a positive-detection phrase appears in that span AND no
+    // negation does.
     const automationTags = [];
     const positiveNear = (kw) => {
-      const m = text.match(new RegExp(`${kw}[^\\n]{0,80}`, 'i'));
+      const m = text.match(new RegExp(`${kw}[\\s\\S]{0,120}`, 'i'));
       if (!m) return false;
       const span = m[0];
       if (/not\s+detected|\bfalse\b|\bno\b|negative/i.test(span)) return false;
