@@ -174,7 +174,16 @@ function findFreshUpstreamCandidates() {
  * Returns null on any failure.
  */
 async function probeUpstreamProxy(row, timeoutMs = 20_000) {
-  const proxyUrl = buildProxyUrlFromRow(row);
+  // buildProxyUrlFromRow throws on unsupported proxy types. Catching it here
+  // (rather than letting it propagate out of the for-loop in rotateAndGetIP)
+  // preserves skip-and-continue semantics across the candidate list.
+  let proxyUrl;
+  try {
+    proxyUrl = buildProxyUrlFromRow(row);
+  } catch (err) {
+    console.warn(`[upstream] skipping row ${row.ip} (session ${row.session}): ${err.message}`);
+    return null;
+  }
   const agent = new HttpsProxyAgent(proxyUrl);
   try {
     const res = await axios.get('https://api.ipify.org?format=json', {
