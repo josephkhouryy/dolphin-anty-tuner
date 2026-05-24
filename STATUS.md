@@ -3,7 +3,7 @@
 Updated by the worker session whenever the situation changes meaningfully (not on every iteration).
 
 ## Pool state
-**1 artifact** -- `output/795884582__score086.json` (score 86, suspect_score 14, only `vm` flagged). This was published BEFORE the new strict gate (`suspect_score=0` + no `anti_detect_browser`). Under the new gate it would not qualify. Joe owes a decision: keep as fallback / move to `rejected/` / delete. Until Joe decides, leave it in `output/` with the index row recording its actual suspect_score so downstream consumers filter on their own gate.
+**0 artifacts.** The previous artifact (`795884582__score086.json`, suspect_score 14, only `vm` flagged) was produced before the multi-judge gate landed and never re-validated against CreepJS / Pixelscan / sannysoft / browserleaks. Retired to `rejected/` with a `_retirement.json` sidecar explaining the gate change. Pool is empty until the multi-judge experiment lands its first pass.
 
 ## Chain wiring (in progress, 2026-05-22)
 Joe greenlit three changes:
