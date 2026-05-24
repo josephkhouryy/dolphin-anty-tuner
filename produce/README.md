@@ -12,7 +12,7 @@ Each iteration:
 
 The loop runs indefinitely (no cap, no "stop at 5"). It writes a `summary.md` to the same experiment dir every N attempts so a human reading the file can see live progress: total attempts, total hits, per-judge failure rates.
 
-Trigger on the AWS Windows VM via `run-as-scheduled-task.ps1`, which launches it inside a Windows Scheduled Task so it survives SSH disconnect.
+Trigger on the AWS Windows VM via `run-producer-as-scheduled-task.ps1` (NOT `run-as-scheduled-task.ps1`, which launches the legacy `tune.js` hill climber). It registers a Windows Scheduled Task so the producer survives SSH disconnect.
 
 Env knobs (all optional):
 - `PRODUCE_MAX_ATTEMPTS` — soft cap on iterations (default: unset, runs forever).
