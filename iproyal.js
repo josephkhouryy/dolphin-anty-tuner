@@ -271,11 +271,19 @@ function buildProxyUrl(sessionId) {
  */
 async function rotateAndGetIP({ retries = 3 } = {}) {
   // ── 1. Try upstream candidates, freshest first, probing each live ──────────
+  // Retry the probe a few times per candidate so a momentary hiccup doesn't
+  // permanently blacklist a curated row. Same backoff shape as the direct
+  // iproyal fallback below (1.5s on first retry, 4s after).
   const candidates = findFreshUpstreamCandidates();
   for (const row of candidates) {
-    const liveIp = await probeUpstreamProxy(row);
+    let liveIp = null;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      liveIp = await probeUpstreamProxy(row);
+      if (liveIp) break;
+      if (attempt < retries) await sleep(attempt === 1 ? 1_500 : 4_000);
+    }
     if (!liveIp) {
-      appendDeadUpstreamRow(row, 'probe failed');
+      appendDeadUpstreamRow(row, `probe failed after ${retries} attempts`);
       continue; // try next candidate
     }
     currentSessionId = row.session;
