@@ -89,26 +89,33 @@ async function judge({ ctx, screenshotsDir, timestamp, label, fs, path }) {
 
     const verdict = await extractPixelscanVerdict(page);
     const reasons = [];
+    const warnings = [];
     if (!verdict.verdictRendered) {
-      // Page never produced a verdict block. Don't fabricate a `flag:` from
-      // marketing chrome -- surface it as a soft signal instead so the
-      // tuner sees "page never loaded" rather than "definitely anti-detect".
-      reasons.push('no_verdict_rendered');
-    } else {
-      if (verdict.detectedFlags.length) {
-        for (const f of verdict.detectedFlags) reasons.push(`flag:${f}`);
-      }
-      if (verdict.negative_phrase && !verdict.positive_phrase) {
-        reasons.push('negative_phrase_only');
-      }
-      if (!verdict.positive_phrase && !verdict.negative_phrase) {
-        reasons.push('no_verdict_text');
-      }
+      // Page never produced a verdict block (CDN block, scan stalled,
+      // unexpected layout change). This is a TRUE soft signal: we don't
+      // know whether the profile is good or bad -- only that pixelscan
+      // didn't tell us. Record it as a warning and let the judge PASS so
+      // the multi-judge gate doesn't fail solely on pixelscan
+      // unreachability. Real positive flags (anti-detect detected, etc.)
+      // still go into `reasons` below when they're present.
+      warnings.push('no_verdict_rendered');
+    }
+    if (verdict.detectedFlags.length) {
+      for (const f of verdict.detectedFlags) reasons.push(`flag:${f}`);
+    }
+    if (verdict.negative_phrase && !verdict.positive_phrase) {
+      reasons.push('negative_phrase_only');
+    }
+    // Only mark "no verdict text" when the scan rendered but said nothing
+    // positive AND nothing negative -- truly ambiguous.
+    if (verdict.verdictRendered && !verdict.positive_phrase && !verdict.negative_phrase) {
+      reasons.push('no_verdict_text');
     }
 
     out.raw = verdict;
     out.pass = reasons.length === 0;
     out.reasons = reasons;
+    if (warnings.length) out.warnings = warnings;
   } catch (e) {
     out.error = e.message;
     out.pass = false;

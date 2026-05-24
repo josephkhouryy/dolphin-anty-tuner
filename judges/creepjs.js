@@ -54,7 +54,14 @@ async function extractCreepjsVerdict(page) {
     // matched on the word alone and reported `tag:headless` on every probe.
     const automationTags = [];
     let headlessSignals = null;
-    const headlessBlockMatch = text.match(/Headless[0-9a-f]*\s*\n([\s\S]{0,400})/i);
+    // Require AT LEAST ONE hex char ([0-9a-f]+, not [0-9a-f]*) so the regex
+    // anchors only on the real "Headless<hash>" block header. With * the
+    // pattern can match any line that ends with the bare word "headless"
+    // (e.g. an explanatory row whose innerText is "...headless\n"), and
+    // text.match() returns the FIRST match, so the captured block would
+    // contain unrelated content and headlessClass would be null -- silently
+    // suppressing real headless detection.
+    const headlessBlockMatch = text.match(/Headless[0-9a-f]+\s*\n([\s\S]{0,400})/i);
     if (headlessBlockMatch) {
       const block = headlessBlockMatch[1];
       const headlessPct = (block.match(/(\d+(?:\.\d+)?)\s*%\s*headless/i) || [])[1];
@@ -76,7 +83,9 @@ async function extractCreepjsVerdict(page) {
     }
     // Webdriver row -- CreepJS renders it as "Webdriver<hash>\nfalse\n" when
     // the flag is hidden by the stealth layer. Only flag when it's "true".
-    if (/Webdriver[0-9a-f]*\s*\n\s*true\b/i.test(text)) automationTags.push('webdriver');
+    // `[0-9a-f]+` (not `*`) so we only match the real block header, not a
+    // bare "webdriver" word elsewhere.
+    if (/Webdriver[0-9a-f]+\s*\n\s*true\b/i.test(text)) automationTags.push('webdriver');
 
     // Fingerprint ID at the top of the page: "FP ID: <64-char hex>".
     const fpHash = (text.match(/FP\s*ID[:\s]+([0-9a-f]{12,})/i)
