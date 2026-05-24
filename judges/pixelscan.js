@@ -24,49 +24,47 @@ async function extractPixelscanVerdict(page) {
   return page.evaluate(() => {
     const fullText = document.body.innerText || '';
 
-    // Pixelscan's marketing chrome (header nav, footer, FAQ, recommendation
-    // lists, sales callouts) all carry phrases that a naive keyword scan
-    // misreads as failure verdicts. Strip the chrome blocks before scanning
-    // by extracting only the section between the page's title and the
-    // footer/FAQ anchors. We also drop any line that contains a known
-    // marketing CTA so menu items can't bleed in.
-    const titleIdx = fullText.search(/Fingerprint\s*Check|Browser\s*Fingerprint/i);
-    const footerIdx = fullText.search(/Frequently\s*Asked|FAQ|Pixelscan\s*Partners|Special\s*Offers|Best\s*Anti[- ]?Detect|Best\s*Proxies/i);
-    const sliceStart = titleIdx >= 0 ? titleIdx : 0;
-    const sliceEnd = footerIdx > sliceStart ? footerIdx : fullText.length;
-    const verdictBlock = fullText.slice(sliceStart, sliceEnd);
+    // Pixelscan's actual scan verdict lives inside the "Fingerprint Scan"
+    // block, which prints "Chrome <version> on <OS>", a "Fingerprint" row
+    // with "No automated behavior detected" or a detected-flag, and a
+    // "Bot check" status. The rest of the page is marketing chrome (nav,
+    // FAQ such as "Is your fingerprint inconsistent...?", footer, links
+    // like "Ultimate Antidetect Guide") that contains the same keywords.
+    // The old text-wide regex matched those FAQ titles and failed every
+    // probe. Slice to the Fingerprint Scan block only.
+    const scanStart = fullText.search(/Fingerprint\s*Scan/i);
+    const scanEnd = fullText.search(/Check\s*Out\s*Other\s*Tools|What\s*Websites\s*See|Frequently\s*Asked|FAQ/i);
+    const scanBlock = scanStart >= 0 && scanEnd > scanStart
+      ? fullText.slice(scanStart, scanEnd)
+      : (scanStart >= 0 ? fullText.slice(scanStart, scanStart + 3000) : '');
 
-    // Strip lines that are obviously menu items / CTAs.
-    const verdictClean = verdictBlock
-      .split('\n')
-      .filter(line => !/^(See|Get|Best|Top|Stay|Try|Buy|Save|\$|Discover|Resources|Tools|Products|Company|Special|RECOMMENDED|TOOLS|GUIDES|RESOURCES|COMPANY|CHECKERS|PARTNERS|BEST)/i.test(line.trim()))
-      .filter(line => !/multilogin|nodemaven|kameleo|gologin|adspower|dolphin|antidetect browser|proxy provider|residential prox|partner/i.test(line))
-      .join('\n');
-
-    const positive = /(\bconsistent\b|looks legit|\bpassed\b|no inconsistencies|real browser|trustworthy)/i.test(verdictClean);
-    const negative = /(modified browser|masking detected|\binconsistent\b|anti[- ]detect|fingerprint masking|automation detected|bot detected|\bspoof)/i.test(verdictClean);
+    const positive = /(\bconsistent\b|looks legit|\bpassed\b|no inconsistencies|real browser|trustworthy|no\s+automated|No\s+Issue)/i.test(scanBlock);
+    const negative = /(modified browser|masking detected|\binconsistent\b|anti[- ]detect\s*(browser|detected)|fingerprint masking|automation detected|bot detected)/i.test(scanBlock);
 
     const detectedFlags = [];
-    if (/anti[- ]detect/i.test(verdictClean)) detectedFlags.push('anti_detect');
-    if (/masking detected/i.test(verdictClean)) detectedFlags.push('masking');
-    if (/\binconsistent\b/i.test(verdictClean)) detectedFlags.push('inconsistent');
-    if (/modified browser/i.test(verdictClean)) detectedFlags.push('modified');
-    if (/automation detected/i.test(verdictClean)) detectedFlags.push('automation');
-    if (/bot detected/i.test(verdictClean)) detectedFlags.push('bot');
-    if (/\bspoof/i.test(verdictClean)) detectedFlags.push('spoof');
-    if (/fingerprint masking/i.test(verdictClean)) detectedFlags.push('fingerprint_masking');
+    // Stricter than the old test -- bare 'anti-detect' matches a menu link;
+    // require 'anti-detect browser' or 'anti-detect detected'.
+    if (/anti[- ]detect\s+(browser|detected)/i.test(scanBlock)) detectedFlags.push('anti_detect');
+    if (/masking detected/i.test(scanBlock)) detectedFlags.push('masking');
+    if (/\binconsistent\b/i.test(scanBlock)) detectedFlags.push('inconsistent');
+    if (/modified browser/i.test(scanBlock)) detectedFlags.push('modified');
+    if (/automation detected/i.test(scanBlock)) detectedFlags.push('automation');
+    if (/bot detected/i.test(scanBlock)) detectedFlags.push('bot');
+    if (/\bspoof(?:ed|ing)?\b/i.test(scanBlock)) detectedFlags.push('spoof');
+    if (/fingerprint masking/i.test(scanBlock)) detectedFlags.push('fingerprint_masking');
 
-    // Whether the verdict block actually has scan results -- if it doesn't
-    // contain any of the expected per-test labels, the page never ran the
-    // scan (CDN block, paywall, redirect to landing page).
-    const verdictRendered = /\b(IP Address|User Agent|Timezone|WebGL|Canvas|WebRTC|Fonts|Languages|Screen|Audio Context)\b/i.test(verdictClean);
+    // Whether the scan block has real scan content: either the platform
+    // line, the "Bot check" status, or the "No automated behavior" verdict.
+    const verdictRendered = /Chrome\s+\d+(?:\.\d+)*\s+on\s+(Windows|Mac|Linux|Android|iOS)/i.test(scanBlock)
+      || /\bBot\s+check\b/i.test(scanBlock)
+      || /No\s+automated\s+behavior\s+detected/i.test(scanBlock);
 
     return {
       positive_phrase: positive,
       negative_phrase: negative,
       detectedFlags,
       verdictRendered,
-      sample: verdictClean.slice(0, 1200),
+      sample: scanBlock.slice(0, 1500),
       fullSample: fullText.slice(0, 1200),
     };
   });

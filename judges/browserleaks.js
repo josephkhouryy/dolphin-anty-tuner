@@ -67,46 +67,48 @@ async function extractSubpageData(page, id) {
     }
 
     if (id === 'webgl') {
-      // browserleaks renders the unmasked-vendor/renderer rows as:
-      //   "Unmasked Vendor\n!\nGoogle Inc. (AMD)"
-      // where the "!" is a tooltip icon. The old regex grabbed "!" instead
-      // of the real value. Skip any single-char "!" line, plus any line
-      // that's purely whitespace, and grab the first non-trivial line after
-      // the label. Also recognise "WebGL Vendor" / "WebGL Renderer".
-      const grabAfter = (label) => {
-        const re = new RegExp(label + '\\s*((?:\\n+[^\\n]*){0,6})', 'i');
-        const m = text.match(re);
-        if (!m) return null;
-        const lines = m[1].split('\n').map(s => s.trim()).filter(s => s && s !== '!' && s !== '?' && s !== '✔' && s !== '✖');
-        // First non-trivial line is the value; anything starting with
-        // another label-looking row ends the field.
-        const stop = /^(Unmasked|Vendor|Renderer|GL Version|Shading|WebGL|Antialias|Debug|HTTP)/i;
-        for (const line of lines) {
-          if (stop.test(line)) break;
-          return line;
+      // browserleaks renders the unmasked-vendor/renderer rows as either:
+      //   "Unmasked Vendor\t\n!\nGoogle Inc. (Apple)\nUnmasked Renderer\t..."
+      // or:
+      //   "Unmasked Vendor\n!\nGoogle Inc. (Apple)"
+      // The "!" is a tooltip icon and ALWAYS sits on its own line BEFORE the
+      // real value. Split on newlines and walk: for each label, find the
+      // index of the line that EXACTLY matches the label and take the first
+      // following non-trivial line.
+      const TRIVIAL = new Set(['', '!', '?', '✔', '✖', '✓', '✗']);
+      const lines = text.split('\n').map(s => s.trim());
+      const valueAfter = (labelExact) => {
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i] === labelExact) {
+            for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+              if (!TRIVIAL.has(lines[j])) return lines[j];
+            }
+          }
         }
         return null;
       };
-      const vendor = grabAfter('Unmasked Vendor') || grabAfter('WebGL Vendor');
-      const renderer = grabAfter('Unmasked Renderer') || grabAfter('WebGL Renderer');
+      const vendor = valueAfter('Unmasked Vendor') || valueAfter('WebGL Vendor');
+      const renderer = valueAfter('Unmasked Renderer') || valueAfter('WebGL Renderer');
       return { kind: 'webgl', vendor: vendor || null, renderer: renderer || null, sample: text.slice(0, 1200) };
     }
 
     if (id === 'canvas') {
-      // Page format: "Canvas Fingerprint\nSignature\n<HEX>\nUniqueness\n<text>".
-      // The old regex was `Signature\s*\n+\s*([A-Za-z0-9]+)` which also
-      // matches the "Signature Stats" header further down (where the value
-      // is the prose "It's very likely..."). Anchor to a hex-only token at
-      // least 16 chars long to avoid prose. Same fix on Uniqueness -- it's
-      // a line of prose ("99.99% (6 of 298939 user agents...)").
-      const sigBlock = text.match(/Canvas Fingerprint\s*\n+\s*Signature\s*\n+\s*([0-9A-Fa-f]{16,})/);
-      const hash = sigBlock ? sigBlock[1] : (text.match(/\bSignature\s*\n+\s*([0-9A-Fa-f]{16,})/) || [])[1] || null;
-      const uniq = (text.match(/Uniqueness\s*\n+\s*([^\n]+)/i) || [])[1] || null;
-      // Canvas page also outs the OS guess when running on a spoofed UA --
+      // Page format on current browserleaks is "Signature\t<HEX>\n" -- the
+      // separator is a literal TAB, not a newline. Older versions used
+      // "Signature\n<HEX>". Match BOTH by allowing any whitespace (`\s+`)
+      // between the label and the hash, while still requiring hex-only and
+      // at least 16 chars to avoid the "Signature Stats" prose section.
+      const sigMatch = text.match(/Canvas Fingerprint[\s\S]{0,80}?\bSignature\s+([0-9A-Fa-f]{16,})/)
+        || text.match(/\bSignature\s+([0-9A-Fa-f]{16,})/);
+      const hash = sigMatch ? sigMatch[1] : null;
+      // Uniqueness is also tab- or newline-separated: "Uniqueness\t100% (...)"
+      const uniq = (text.match(/Uniqueness\s+([^\n]+)/i) || [])[1] || null;
+      // Canvas page also prints an OS guess when running on a spoofed UA --
       // "It's very likely that your web browser is Chrome and your operating
       // system is <Mac|Windows|Linux>". This is the canvas-driven OS-leak
-      // signal that fp.com translates into tampering=true. Surface it so the
-      // judge can pass-or-fail on it directly.
+      // signal that fp.com translates into tampering=true. The line only
+      // appears on a MISMATCH (no line = canvas and declared UA agree),
+      // which is the success state.
       const osGuess = (text.match(/operating system is\s+([A-Za-z]+)/i) || [])[1] || null;
       const browserGuess = (text.match(/web browser is\s+([A-Za-z]+)/i) || [])[1] || null;
       return { kind: 'canvas', hash, uniqueness: uniq?.trim() || null, osGuess, browserGuess, sample: text.slice(0, 1200) };

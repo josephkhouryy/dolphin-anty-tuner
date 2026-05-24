@@ -276,7 +276,10 @@ async function runOnce(iter) {
       profileId,
       label: `produce-${iter}`,
       expectedProxyIp: ip,
-      declaredOs: 'windows',
+      // Use the payload's actual platform rather than hardcoding 'windows' --
+      // generate.js now defaults to macOS (matching the bench host) and the
+      // judges' OS-mismatch checks must score against the real spoof.
+      declaredOs: payload.platform || (process.env.PROFILE_OS || 'macos').toLowerCase(),
       allowedLocalIps: process.env.BENCH_ALLOWED_LOCAL_IPS
         ? process.env.BENCH_ALLOWED_LOCAL_IPS.split(',').map(s => s.trim()).filter(Boolean)
         : null,

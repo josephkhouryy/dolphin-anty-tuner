@@ -287,20 +287,27 @@ async function main() {
 
   await cleanupStaleTunerProfiles();
 
-  // Resume from prior best if present, else build baseline
+  // Resume from prior best if present AND its OS matches our current target
+  // OS. Otherwise discard the saved best -- a Windows baseline can't usefully
+  // hill-climb when the target OS is macOS (and vice versa).
+  const targetOs = (process.env.PROFILE_OS || 'macos').toLowerCase();
   let bestRecord = loadBest();
   let best = bestRecord?.payload ? { payload: bestRecord.payload, score: bestRecord.score } : null;
+  if (best && best.payload?.platform && best.payload.platform !== targetOs) {
+    console.log(`\n♻️   Saved best is OS=${best.payload.platform} but target is ${targetOs}; discarding and rebuilding baseline.`);
+    best = null;
+  }
   const triedMoves = [];                                          // (knob,value) pairs already attempted from current best
 
   if (!best) {
-    console.log(`\n🌱  Building baseline candidate from Dolphin fingerprint API...`);
+    console.log(`\n🌱  Building baseline candidate from Dolphin fingerprint API (OS=${targetOs})...`);
     const baseline = await buildBaseline({ name: freshName('tuner') });
     const baselineResult = await runOnce({ payload: baseline, label: 'baseline-0' });
     best = { payload: baseline, score: baselineResult.score };
     if (baselineResult.score.total >= 0) persistBest(baseline, baselineResult.score);
     console.log(`     baseline score = ${baselineResult.score.total}/100`);
   } else {
-    console.log(`\n♻️   Resuming from saved best (score=${best.score.total}/100)`);
+    console.log(`\n♻️   Resuming from saved best (OS=${best.payload.platform}, score=${best.score.total}/100)`);
   }
 
   let streak = best.score.total >= TARGET_SCORE ? 1 : 0;

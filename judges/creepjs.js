@@ -100,7 +100,10 @@ async function extractCreepjsVerdict(page) {
       automationTags,
       headlessSignals,
       fpHash,
-      sample: text.slice(0, 3000),
+      // Larger sample so debugging the page layout doesn't require a fresh
+      // run. The trust score and lies count tend to be far down the page.
+      sample: text.slice(0, 8000),
+      textLength: text.length,
     };
   });
 }
@@ -110,12 +113,18 @@ async function judge({ ctx, screenshotsDir, timestamp, label, fs, path }) {
   const out = { id: 'creepjs', url: URL };
   try {
     await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    // CreepJS does a slow client-side compute; wait for the trust % to render.
+    // CreepJS does a slow client-side compute; wait for the trust % or for
+    // the grade banner (`A 97% (97.50/100)` style) to render. Some Mac
+    // configurations take 30s+ to settle the trust banner.
     await page.waitForFunction(
-      () => /%\s*trust|trust\s*score[^\d]*\d|%\s*\(\s*\d/i.test(document.body.innerText || ''),
-      { timeout: 45000 }
+      () => {
+        const t = document.body.innerText || '';
+        // Either the trust phrase or the `<n>% (<n>/100)` banner.
+        return /%\s*trust|trust\s*score[^\d]*\d|\d+(?:\.\d+)?\s*%\s*\(\s*\d+(?:\.\d+)?\s*\/\s*100\s*\)/i.test(t);
+      },
+      { timeout: 60000 }
     ).catch(() => {});
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(5000);
 
     const shot = path.join(screenshotsDir, `${timestamp}_${label}_creepjs.png`);
     await page.screenshot({ path: shot, fullPage: true }).catch(() => {});
