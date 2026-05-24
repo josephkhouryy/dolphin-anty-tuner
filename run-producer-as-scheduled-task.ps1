@@ -53,7 +53,10 @@ $envBlock
 "$nodeExe" produce\produce.js
 "@ | Set-Content -Path $cmdLauncher -Encoding ASCII -Force
 
-& schtasks /Create /TN $taskName /TR $cmdLauncher /SC ONCE /ST 00:00 /SD 01/01/2099 /RL HIGHEST /F | Out-Null
+# Quote the /TR path literally -- schtasks stores it verbatim and cmd.exe
+# splits unquoted paths on spaces, so a $PSScriptRoot like
+# "C:\Users\John Smith\..." would create the task but silently fail to run.
+& schtasks /Create /TN $taskName /TR "`"$cmdLauncher`"" /SC ONCE /ST 00:00 /SD 01/01/2099 /RL HIGHEST /F | Out-Null
 & schtasks /Run /TN $taskName | Out-Null
 
 Start-Sleep -Seconds 3
