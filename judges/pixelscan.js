@@ -18,7 +18,10 @@ async function extractPixelscanVerdict(page) {
   return page.evaluate(() => {
     const text = document.body.innerText || '';
 
-    const positive = /(consistent|looks legit|passed|no inconsistencies|real browser)/i.test(text);
+    // Anchor "consistent" and "passed" with \b so they don't match inside
+    // "inconsistent" or substrings -- otherwise a failing page sets
+    // positive_phrase=true and confuses any consumer reading raw flags.
+    const positive = /(\bconsistent\b|looks legit|\bpassed\b|no inconsistencies|real browser)/i.test(text);
     const negative = /(modified browser|masking detected|inconsistent|anti[- ]detect|spoof|fingerprint masking|automation detected|bot detected)/i.test(text);
 
     const detectedFlags = [];

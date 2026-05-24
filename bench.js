@@ -112,28 +112,39 @@ async function bench({
   const screenshotsDir = path.join(__dirname, 'screenshots', 'bench');
   fs.mkdirSync(screenshotsDir, { recursive: true });
 
+  // Each judge runs inside its own try/catch -- a thrown ctx.newPage() (e.g.
+  // browser disconnect, resource exhaustion) on one judge must not abort the
+  // whole bench, or the entire iteration's JSONL record is lost.
   const judges = {};
   for (const j of JUDGES) {
     console.log(`Judge: ${j.id} ...`);
-    judges[j.id] = await j.mod.judge({
-      ctx, screenshotsDir, timestamp, label, fs, path,
-      expectedProxyIp, declaredOs,
-      allowedLocalIps, skipLocalIpCheck,
-    });
+    try {
+      judges[j.id] = await j.mod.judge({
+        ctx, screenshotsDir, timestamp, label, fs, path,
+        expectedProxyIp, declaredOs,
+        allowedLocalIps, skipLocalIpCheck,
+      });
+    } catch (e) {
+      console.warn(`  Judge ${j.id} threw: ${e.message}`);
+      judges[j.id] = { id: j.id, pass: false, reasons: [`error:${e.message}`], error: e.message };
+    }
     const verdict = judges[j.id].pass ? 'PASS' : 'FAIL';
     const reasons = judges[j.id].reasons || [];
     console.log(`  ${verdict}  reasons: ${reasons.slice(0, 4).join(' | ') || '(none)'}`);
   }
 
-  const probeTab = await ctx.newPage();
+  // ctx.newPage() can throw on a disconnected browser; if it does we still
+  // want the run's JSONL record to land, just with probe=error.
   let probeData = null;
+  let probeTab = null;
   try {
+    probeTab = await ctx.newPage();
     await probeTab.goto('about:blank', { timeout: 10000 });
     probeData = await probe(probeTab);
   } catch (e) {
     probeData = { error: e.message };
   } finally {
-    await probeTab.close().catch(() => {});
+    if (probeTab) await probeTab.close().catch(() => {});
   }
   await browser.close().catch(() => {});
 
