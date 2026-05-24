@@ -109,24 +109,31 @@ function appendConsumed(entry) {
   }
 }
 
+function safeParseDate(s) {
+  if (typeof s !== 'string') return NaN;
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : NaN;
+}
+
 /**
- * Reads the upstream ledger, returns the freshest row that:
- *   - is not a stale marker (stale !== true)
- *   - has not passed its staleAt timestamp
- *   - has not been consumed by this folder before
- * or null if no such row exists.
+ * Reads the upstream ledger and returns ALL fresh candidate rows (sorted
+ * freshest-first), filtered to:
+ *   - not a stale marker (stale !== true)
+ *   - has a valid, future staleAt timestamp (malformed → reject, fail-closed)
+ *   - has a valid ts timestamp (malformed → reject, can't rank it)
+ *   - has not been consumed or recorded as dead by this folder before
  *
- * Picks the latest row per (ip, session) pair per the consumer pattern in
- * STATUS.md.
+ * Returns [] when no candidate exists. Caller iterates and probes each
+ * candidate's proxy live before committing.
  */
-function findFreshUpstreamRow() {
-  if (!fs.existsSync(UPSTREAM_LEDGER)) return null;
+function findFreshUpstreamCandidates() {
+  if (!fs.existsSync(UPSTREAM_LEDGER)) return [];
   let lines;
   try {
     lines = fs.readFileSync(UPSTREAM_LEDGER, 'utf8').split('\n').filter(Boolean);
   } catch (e) {
     console.warn(`[upstream] could not read ledger ${UPSTREAM_LEDGER}: ${e.message}`);
-    return null;
+    return [];
   }
 
   // Walk in order so the LAST occurrence of each (ip, session) wins.
@@ -140,21 +147,68 @@ function findFreshUpstreamRow() {
     }
   }
 
-  const consumed = readConsumedKeys();
+  const skip = readConsumedKeys(); // includes both successful consumptions and dead-marked rows
   const now = Date.now();
   const candidates = [];
   for (const [key, row] of byKey) {
     if (row.stale === true) continue;
-    if (row.staleAt && now > Date.parse(row.staleAt)) continue;
-    if (consumed.has(key)) continue;
+    const staleAtMs = safeParseDate(row.staleAt);
+    // Reject rows with missing or malformed staleAt — fail-closed; we can't
+    // tell if they're still valid.
+    if (!Number.isFinite(staleAtMs) || now > staleAtMs) continue;
+    const tsMs = safeParseDate(row.ts);
+    if (!Number.isFinite(tsMs)) continue;
+    if (skip.has(key)) continue;
     if (!row.proxy || !row.proxy.host || !row.proxy.port || !row.proxy.login || !row.proxy.password) continue;
-    candidates.push(row);
+    candidates.push({ row, tsMs });
   }
-  if (candidates.length === 0) return null;
+  // Freshest first.
+  candidates.sort((a, b) => b.tsMs - a.tsMs);
+  return candidates.map((c) => c.row);
+}
 
-  // Freshest first — `ts` is the score timestamp from Good IP Finder.
-  candidates.sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
-  return candidates[0];
+/**
+ * Pings ipify through the given upstream row's proxy to confirm the proxy
+ * actually connects. Returns the IP reported by the proxy on success
+ * (which may differ from row.ip if the upstream session was reassigned).
+ * Returns null on any failure.
+ */
+async function probeUpstreamProxy(row, timeoutMs = 20_000) {
+  const proxyUrl = buildProxyUrlFromRow(row);
+  const agent = new HttpsProxyAgent(proxyUrl);
+  try {
+    const res = await axios.get('https://api.ipify.org?format=json', {
+      httpsAgent: agent, httpAgent: agent, proxy: false, timeout: timeoutMs,
+    });
+    const ip = res.data?.ip;
+    return ip || null;
+  } catch (err) {
+    const code = err.response?.status || err.code || 'unknown';
+    console.warn(`[upstream] probe failed for ${row.ip} (session ${row.session}): ${code}`);
+    return null;
+  }
+}
+
+function appendDeadUpstreamRow(row, reason) {
+  // Re-use the consumed-log file so dead rows are also skipped on next read;
+  // we mark `consumed_as` so future debugging can distinguish.
+  const dir = path.dirname(CONSUMED_LOG);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const entry = {
+    ts: new Date().toISOString(),
+    ip: row.ip,
+    session: row.session,
+    score: row.score,
+    country: row.country,
+    source: 'good-ip-finder',
+    consumed_as: 'dead_proxy',
+    reason,
+  };
+  try {
+    fs.appendFileSync(CONSUMED_LOG, JSON.stringify(entry) + '\n');
+  } catch (e) {
+    console.warn(`[upstream] could not record dead row: ${e.message}`);
+  }
 }
 
 function buildProxyUrlFromRow(row) {
@@ -200,21 +254,38 @@ function buildProxyUrl(sessionId) {
  * row is available.
  */
 async function rotateAndGetIP({ retries = 3 } = {}) {
-  // ── 1. Try upstream ────────────────────────────────────────────────────────
-  const upstreamRow = findFreshUpstreamRow();
-  if (upstreamRow) {
-    currentSessionId = upstreamRow.session;
-    currentUpstreamProxyUrl = buildProxyUrlFromRow(upstreamRow);
-    appendConsumed(upstreamRow);
-    console.log(
-      `📥  [upstream] consumed Good IP Finder row: ${upstreamRow.ip} ` +
-      `(session ${upstreamRow.session}, score ${upstreamRow.score}, ${upstreamRow.country})`
-    );
-    return upstreamRow.ip;
+  // ── 1. Try upstream candidates, freshest first, probing each live ──────────
+  const candidates = findFreshUpstreamCandidates();
+  for (const row of candidates) {
+    const liveIp = await probeUpstreamProxy(row);
+    if (!liveIp) {
+      appendDeadUpstreamRow(row, 'probe failed');
+      continue; // try next candidate
+    }
+    currentSessionId = row.session;
+    currentUpstreamProxyUrl = buildProxyUrlFromRow(row);
+    appendConsumed(row);
+    if (liveIp !== row.ip) {
+      console.log(
+        `📥  [upstream] consumed Good IP Finder row: ${row.ip} ` +
+        `(session ${row.session}, score ${row.score}, ${row.country}) ` +
+        `— note: live proxy returned ${liveIp}, the upstream session was reassigned`
+      );
+    } else {
+      console.log(
+        `📥  [upstream] consumed Good IP Finder row: ${row.ip} ` +
+        `(session ${row.session}, score ${row.score}, ${row.country})`
+      );
+    }
+    return liveIp;
   }
 
   // ── 2. Fall back to direct iproyal rotation ────────────────────────────────
-  console.log('[upstream] no fresh row in ../Good IP Finder/output/index.jsonl; rotating direct iproyal session');
+  if (candidates.length > 0) {
+    console.log(`[upstream] all ${candidates.length} candidate(s) failed live probe; falling through to direct iproyal`);
+  } else {
+    console.log('[upstream] no fresh row in ../Good IP Finder/output/index.jsonl; rotating direct iproyal session');
+  }
   currentUpstreamProxyUrl = null;
 
   let lastErr;
