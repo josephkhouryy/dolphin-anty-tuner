@@ -26,6 +26,30 @@ const SUMMARY_EVERY   = parseInt(process.env.PRODUCE_SUMMARY_EVERY || '25', 10);
 // ban upstream. 5s is short enough to recover quickly when the outage clears.
 const ERROR_BACKOFF_MS = parseInt(process.env.PRODUCE_ERROR_BACKOFF_MS || '5000', 10);
 
+// Publication policy. STATUS.md spells out the split:
+//   PUBLISH_THRESHOLD -- legacy 0-100 score at which we write to output/. Set
+//     to 80 by default because the single-knob hill climb caps around 86 with
+//     only `vm` flagged; downstream (Hotmail) tests whether 80-86 + vm is good
+//     enough and we'll tighten via rejected/ feedback.
+//   pass_all (all 5 judges clean) -- still recorded in the artifact for
+//     downstream's information, but no longer a hard publication gate. The
+//     non-fp judges (CreepJS, Pixelscan, sannysoft, browserleaks) often fail
+//     for proxy-network reasons (ERR_CONNECTION_CLOSED) that don't reflect
+//     profile quality, so gating publication on pass_all dries up the pool.
+// parseInt('abc', 10) returns NaN, and `n >= NaN` is always false -- so a
+// non-numeric override would silently block every publication with no signal
+// at all. Warn + fall back to the default 80 when the env var is unparseable.
+const PUBLISH_THRESHOLD = (() => {
+  const raw = process.env.PRODUCE_PUBLISH_THRESHOLD;
+  if (raw === undefined || raw === '') return 80;
+  const v = parseInt(raw, 10);
+  if (Number.isNaN(v)) {
+    console.warn(`PRODUCE_PUBLISH_THRESHOLD="${raw}" is not a number; using default 80`);
+    return 80;
+  }
+  return v;
+})();
+
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 const SUBPROJECT_ROOT = path.resolve(__dirname, '..');
@@ -61,7 +85,7 @@ fs.mkdirSync(RUN_DIR,    { recursive: true });
 
 // ─── Output writers ──────────────────────────────────────────────────────────
 
-function persistGoodProfile({ dolphinProfileId, ip, judges, score, payload }) {
+function persistGoodProfile({ dolphinProfileId, ip, judges, score, pass_all, payload }) {
   const safeScore = String(score.total).padStart(3, '0');
   const filename = `${dolphinProfileId}__score${safeScore}.json`;
   const file = path.join(OUTPUT_DIR, filename);
@@ -71,6 +95,7 @@ function persistGoodProfile({ dolphinProfileId, ip, judges, score, payload }) {
     score: score.total,
     suspect_score: score.suspect_score,
     signals: score.signals,
+    pass_all,                                         // true only when all 5 judges passed
     judges: Object.fromEntries(
       Object.entries(judges).map(([id, j]) => [id, { pass: j.pass, reasons: j.reasons }])
     ),
@@ -84,6 +109,7 @@ function persistGoodProfile({ dolphinProfileId, ip, judges, score, payload }) {
     ip,
     score: score.total,
     suspect_score: score.suspect_score,
+    pass_all,
     flagged_signals: Object.entries(score.signals || {}).filter(([, v]) => v === true).map(([k]) => k),
     judges_passed: Object.entries(judges).filter(([, j]) => j.pass).map(([id]) => id),
     validated_at: record.validated_at,
@@ -94,6 +120,29 @@ function persistGoodProfile({ dolphinProfileId, ip, judges, score, payload }) {
 
 function appendRunLog(record) {
   try { fs.appendFileSync(RUN_LOG, JSON.stringify(record) + '\n'); } catch {}
+}
+
+// Append-only event published to the parent `Dolphin Anty/events.jsonl` so
+// the coordinator session and any sibling can `tail -F` the project-level
+// log without digging into each subproject's run dir. Per CLAUDE.md
+// (filesystem-as-message-bus + sealed-folder), this is the single exception
+// to the "no cross-folder writes" rule: every session MAY append (never edit)
+// to events.jsonl.
+const PARENT_EVENTS = path.resolve(SUBPROJECT_ROOT, '..', 'events.jsonl');
+function appendParentEvent(payload) {
+  const row = {
+    ts: new Date().toISOString(),
+    folder: 'Good Dolphin Anty Profile Finder',
+    ...payload,
+  };
+  // Best-effort: parent events log must not kill the producer loop if the
+  // parent dir is unwritable or briefly locked. Per-write console warn only,
+  // no thrown propagation.
+  try {
+    fs.appendFileSync(PARENT_EVENTS, JSON.stringify(row) + '\n');
+  } catch (e) {
+    console.warn(`[events.jsonl] append failed: ${e.message}`);
+  }
 }
 
 function readRunLog() {
@@ -118,8 +167,10 @@ function readRunLog() {
 function writeSummary() {
   const rows = readRunLog();
   const total = rows.length;
-  const hits = rows.filter(r => r.pass_all).length;
-  const successRate = total ? (hits / total * 100).toFixed(1) : '0.0';
+  const published = rows.filter(r => r.published === true).length;
+  const fullClean = rows.filter(r => r.pass_all === true).length;
+  const publishRate = total ? (published / total * 100).toFixed(1) : '0.0';
+  const fullCleanRate = total ? (fullClean / total * 100).toFixed(1) : '0.0';
 
   // Per-judge failure counts. Denominator excludes iterations that errored
   // out before reaching bench -- those don't have a `judges` field. Reporting
@@ -149,14 +200,16 @@ function writeSummary() {
     .map(([s, c]) => `- ${s}: ${c}`)
     .join('\n') || '(none)';
 
-  const lastHit = rows.slice().reverse().find(r => r.pass_all);
+  const lastPublish = rows.slice().reverse().find(r => r.published === true);
+  const lastFullClean = rows.slice().reverse().find(r => r.pass_all === true);
   const md = [
     `# Run ${RUN_ID}`,
     ``,
     `- Attempts: **${total}**`,
-    `- Hits (passed all 5 judges): **${hits}**`,
-    `- Success rate: **${successRate}%**`,
-    `- Last hit: ${lastHit ? `${lastHit.iter} at ${lastHit.ts}` : '(none yet)'}`,
+    `- Published (score >= ${PUBLISH_THRESHOLD}): **${published}** (${publishRate}%)`,
+    `- Fully clean (all 5 judges passed): **${fullClean}** (${fullCleanRate}%)`,
+    `- Last publish: ${lastPublish ? `${lastPublish.iter} at ${lastPublish.ts}` : '(none yet)'}`,
+    `- Last fully-clean: ${lastFullClean ? `${lastFullClean.iter} at ${lastFullClean.ts}` : '(none yet)'}`,
     ``,
     `## Per-judge failure counts`,
     judgeFailTable,
@@ -246,8 +299,31 @@ async function runOnce(iter) {
     attempt.suspect_score = benchResult.suspect_score;
     attempt.flagged_signals = Object.entries(benchResult.signals || {})
       .filter(([, v]) => v === true).map(([k]) => k);
+    // Carry the legacy 0-100 score onto attempt so the parent events.jsonl
+    // row (in main) can include it without re-reading bench result.
+    attempt.score = benchResult.score ? { total: benchResult.score.total } : null;
 
-    if (benchResult.pass_all) {
+    // Publication gate: score-based per STATUS.md (PUBLISH_THRESHOLD=80).
+    // `pass_all` is recorded in the artifact so downstream can prefer
+    // fully-clean profiles, but it's not a hard gate -- non-fp judges fail
+    // for proxy-network reasons unrelated to profile quality and would
+    // otherwise dry up the pool. Reject when score is null (fp_playground
+    // errored out entirely) -- nothing to publish in that case.
+    //
+    // Additional hard reject: `anti_detect_browser=true` from fp.com. This
+    // is a deterministic verdict, not a noisy probabilistic signal -- if
+    // fp.com identified the browser as an anti-detect tool, every
+    // downstream consumer that hits fp.com (or any fp.com-derived signal)
+    // will reject the profile. Publishing it would only waste downstream
+    // attempts. Pulled from judges.fp_playground.raw.anti_detect_browser.
+    const totalScore = benchResult.score?.total;
+    const antiDetect = benchResult.judges?.fp_playground?.raw?.anti_detect_browser === true;
+    attempt.anti_detect_browser = antiDetect;
+    const shouldPublish = typeof totalScore === 'number'
+      && totalScore >= PUBLISH_THRESHOLD
+      && !antiDetect;
+    if (shouldPublish) {
+      attempt.published = true;
       // A disk-full / permissions error on persist must NOT kill the forever
       // loop. Log and keep going -- the bench result still went to log.jsonl
       // so we have the data even when output/ couldn't be written.
@@ -257,15 +333,29 @@ async function runOnce(iter) {
           ip,
           judges: benchResult.judges,
           score: benchResult.score,
+          pass_all: !!benchResult.pass_all,
           payload,
         });
-        console.log(`PUBLISHED ${file}`);
+        console.log(`PUBLISHED ${file}  (score=${totalScore}, pass_all=${!!benchResult.pass_all})`);
       } catch (e) {
+        // Surface persist failures distinctly. `persist_error` keeps the raw
+        // message; setting `attempt.error` too is what makes the parent
+        // events.jsonl row classify as `iter_error` instead of the default
+        // `iter_rejected` -- without this a disk-full / permissions failure
+        // would be indistinguishable from a routine score-gate rejection in
+        // the coordinator's event tail.
         console.error(`persistGoodProfile failed: ${e.message}`);
         attempt.persist_error = e.message;
+        attempt.error = `persist:${e.message}`;
+        attempt.published = false;
       }
     } else {
-      console.log(`failing=[${benchResult.failing.join(',')}]`);
+      attempt.published = false;
+      const reasons = [];
+      if (typeof totalScore !== 'number') reasons.push('score=unknown (fp_playground error?)');
+      else if (totalScore < PUBLISH_THRESHOLD) reasons.push(`score=${totalScore}<${PUBLISH_THRESHOLD}`);
+      if (antiDetect) reasons.push('anti_detect_browser=true');
+      console.log(`not published: ${reasons.join(' ')}  failing=[${benchResult.failing.join(',')}]`);
     }
   }
 
@@ -302,7 +392,8 @@ async function main() {
   console.log(`  summary_every: ${SUMMARY_EVERY} attempts`);
 
   let iter = 0;
-  let hits = 0;
+  let published = 0;
+  let fullClean = 0;
   while (true) {
     iter += 1;
     if (MAX_ATTEMPTS > 0 && iter > MAX_ATTEMPTS) {
@@ -310,9 +401,35 @@ async function main() {
       break;
     }
     const r = await runOnce(iter);
-    if (r.pass_all) hits += 1;
-    if (iter % SUMMARY_EVERY === 0 || r.pass_all) writeSummary();
-    console.log(`progress: iter=${iter}  hits=${hits}  rate=${(hits / iter * 100).toFixed(1)}%`);
+    if (r.published) published += 1;
+    if (r.pass_all) fullClean += 1;
+    // Refresh the on-disk summary on every publish too, not only the slow
+    // SUMMARY_EVERY beat -- otherwise a human checking the file right after
+    // a publish would see the previous cycle's numbers.
+    if (iter % SUMMARY_EVERY === 0 || r.published) writeSummary();
+    console.log(
+      `progress: iter=${iter}  published=${published} (${(published / iter * 100).toFixed(1)}%)` +
+      `  full-clean=${fullClean} (${(fullClean / iter * 100).toFixed(1)}%)`
+    );
+    // Append a meaningful event to the parent events.jsonl so the coordinator
+    // session (and any sibling) can `tail -F` the project-level event log
+    // without having to dig into each subproject's run dir.
+    appendParentEvent({
+      kind: r.published ? 'profile_published'
+        : r.error ? 'iter_error'
+        : 'iter_rejected',
+      iter,
+      profileId: r.profileId || null,
+      ip: r.ip || null,
+      session: r.session || null,
+      score: r.score?.total ?? null,
+      suspect_score: r.suspect_score ?? null,
+      pass_all: r.pass_all === true,
+      anti_detect_browser: r.anti_detect_browser === true,
+      failing: r.failing || null,
+      flagged_signals: r.flagged_signals || null,
+      error: r.error || null,
+    });
     // Back off when this iteration errored out (rotation, baseline, create,
     // bench). Prevents a hard upstream outage from burning through iterations.
     if (r.error && ERROR_BACKOFF_MS > 0) {
