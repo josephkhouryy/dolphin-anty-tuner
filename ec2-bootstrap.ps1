@@ -39,7 +39,7 @@ function Read-Secret {
   finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
 }
 
-$IPROYAL_USERNAME      = Read-Host  -Prompt "IPRoyal proxy username (e.g. mzEcAaG0CQUNGzuc — Mobile or Residential, your choice)"
+$IPROYAL_USERNAME      = Read-Host  -Prompt "IPRoyal proxy username (Mobile or Residential — from your iproyal.com dashboard)"
 $IPROYAL_BASE_PASSWORD = Read-Secret -Prompt "IPRoyal proxy password (the BASE — without _country/_session/_lifetime suffixes)"
 $DOLPHIN_API_TOKEN     = Read-Secret -Prompt "Dolphin Anty API token (long JWT from Settings -> API)"
 $ABUSEIPDB_API_KEY     = Read-Secret -Prompt "AbuseIPDB API key (from https://www.abuseipdb.com/account/api)"
