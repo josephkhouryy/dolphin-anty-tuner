@@ -59,6 +59,7 @@ async function judge({ ctx, screenshotsDir, timestamp, label, fs, path }) {
     const reasons = [];
     if (verdict.total === 0) reasons.push('no_rows_parsed');
     if (verdict.webdriverFailed === true) reasons.push('webdriver_failed');
+    else if (verdict.webdriverFailed === null && verdict.total > 0) reasons.push('webdriver_row_not_found');
     if (verdict.failedCount > 0) {
       for (const r of verdict.failedLabels.slice(0, 6)) reasons.push(`failed:${r}`);
     }

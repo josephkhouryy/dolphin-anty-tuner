@@ -32,6 +32,7 @@ async function extractSubpageData(page, id) {
       const localIps = ipv4s.filter(ip =>
         ip.startsWith('10.') ||
         ip.startsWith('192.168.') ||
+        ip.startsWith('169.254.') ||
         /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
       );
       const publicIps = ipv4s.filter(ip => !localIps.includes(ip));
