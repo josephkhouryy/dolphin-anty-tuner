@@ -98,7 +98,19 @@ function appendRunLog(record) {
 
 function readRunLog() {
   if (!fs.existsSync(RUN_LOG)) return [];
-  return fs.readFileSync(RUN_LOG, 'utf8').split('\n').filter(Boolean).map(l => {
+  // Wrap the read -- on Windows, AV scans / backup agents can hold a brief
+  // exclusive lock between existsSync and readFileSync. A transient read
+  // failure must NOT propagate to main() and kill the forever loop; return
+  // an empty array so writeSummary just writes "0 attempts, 0 hits" this
+  // cycle and tries again next time.
+  let content;
+  try {
+    content = fs.readFileSync(RUN_LOG, 'utf8');
+  } catch (e) {
+    console.warn(`[produce] could not read run log: ${e.message}`);
+    return [];
+  }
+  return content.split('\n').filter(Boolean).map(l => {
     try { return JSON.parse(l); } catch { return null; }
   }).filter(Boolean);
 }
