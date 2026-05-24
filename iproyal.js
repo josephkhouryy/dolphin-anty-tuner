@@ -1,26 +1,33 @@
 /**
  * iproyal.js
  * ──────────────────────────────────────────────────────────────────────────────
- * Handles all IPRoyal proxy interactions using SESSION-BASED rotation.
+ * Proxy provider for the tuner. Two paths:
  *
- * How IPRoyal rotation works (your plan):
- *   Your proxy string looks like:
- *   http://USERNAME:PASSWORD_country-us_session-XXXXX_lifetime-168h_streaming-1@geo.iproyal.com:12321
+ * 1. UPSTREAM (preferred): consume a pre-scored Microsoft-acceptable IP from
+ *    `../Good IP Finder/output/index.jsonl`. Each row carries proxy creds +
+ *    a session ID + an IP we already know. We mark the row as used in
+ *    `data/consumed-ips.jsonl` so we never reuse it across two profiles.
  *
- *   To get a NEW IP, you simply change the "_session-XXXXX" part to a new
- *   random string. IPRoyal treats it as a new session and assigns a fresh IP.
- *   No rotation link needed!
+ *    See `../Good IP Finder/STATUS.md` for the ledger format and the
+ *    consume-once contract.
  *
- * Functions:
- *   rotateAndGetIP() → string  builds a new session proxy URL → returns the new IP
- *   buildProxyUrl()  → string  returns the current proxy URL (used by vision.js)
- *   getCurrentSessionId() → string  the session ID used in the last rotation
+ * 2. DIRECT iproyal fallback: when no fresh row is available upstream, fall
+ *    back to generating a fresh `_session-XXXX` directly against geo.iproyal.com
+ *    and discover the IP via ipify. This path bypasses IPQS pre-scoring — the
+ *    profile's own fingerprint judges become the only quality gate. Use sparingly.
+ *
+ * Public API (unchanged, callers don't need to know which path was taken):
+ *   rotateAndGetIP() → Promise<string>   the IP that will be exposed
+ *   buildProxyUrl()  → string            the proxy URL for the current session
+ *   getCurrentSessionId() → string|null  the session ID used in the last rotation
  */
 
 'use strict';
 
 require('dotenv').config();
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { randomBytes } = require('crypto');
 
@@ -36,34 +43,218 @@ const {
   IPROYAL_STREAMING = '1',
 } = process.env;
 
-// We store the current session ID so vision.js can use the same session
+// Upstream ledger + local consumed-log paths. Resolved at module load so they
+// don't depend on process.cwd().
+const UPSTREAM_LEDGER = path.resolve(__dirname, '..', 'Good IP Finder', 'output', 'index.jsonl');
+const CONSUMED_LOG = path.resolve(__dirname, 'data', 'consumed-ips.jsonl');
+
+// Mutable state set by the last rotation. `currentUpstreamProxyUrl` is only
+// non-null when the last rotation consumed an upstream row — in that case
+// buildProxyUrl() returns it verbatim instead of rebuilding from local env
+// (because upstream creds may differ from this folder's IPROYAL_USERNAME).
 let currentSessionId = null;
+let currentUpstreamProxyUrl = null;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Generates a random 8-character session ID (letters + numbers).
- * Changing this to a new value forces IPRoyal to assign a fresh IP.
- */
 function generateSessionId() {
   return randomBytes(4).toString('hex'); // e.g. "a3f8c1d2"
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function consumedKey(ip, sessionId) {
+  return `${ip}|${sessionId}`;
+}
+
+function readConsumedKeys() {
+  if (!fs.existsSync(CONSUMED_LOG)) return new Set();
+  try {
+    const lines = fs.readFileSync(CONSUMED_LOG, 'utf8').split('\n').filter(Boolean);
+    const set = new Set();
+    for (const line of lines) {
+      try {
+        const row = JSON.parse(line);
+        if (row && row.ip && row.session) set.add(consumedKey(row.ip, row.session));
+      } catch {
+        // Skip malformed lines; consumed-log is best-effort, not authoritative.
+      }
+    }
+    return set;
+  } catch (e) {
+    console.warn(`[upstream] could not read consumed-log (${e.message}); treating as empty`);
+    return new Set();
+  }
+}
+
+function appendConsumed(entry) {
+  const dir = path.dirname(CONSUMED_LOG);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const row = {
+    ts: new Date().toISOString(),
+    ip: entry.ip,
+    session: entry.session,
+    score: entry.score,
+    country: entry.country,
+    source: 'good-ip-finder',
+  };
+  try {
+    fs.appendFileSync(CONSUMED_LOG, JSON.stringify(row) + '\n');
+  } catch (e) {
+    console.warn(`[upstream] could not append to consumed-log: ${e.message}`);
+    // Best-effort — if write fails, we may re-consume this row on next call,
+    // but the worst case is wasted work, not corruption.
+  }
+}
+
+function safeParseDate(s) {
+  if (typeof s !== 'string') return NaN;
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : NaN;
+}
+
 /**
- * Builds the full IPRoyal proxy URL with the current session ID.
+ * Reads the upstream ledger and returns ALL fresh candidate rows (sorted
+ * freshest-first), filtered to:
+ *   - not a stale marker (stale !== true)
+ *   - has a valid, future staleAt timestamp (malformed → reject, fail-closed)
+ *   - has a valid ts timestamp (malformed → reject, can't rank it)
+ *   - has not been consumed or recorded as dead by this folder before
  *
- * Format:
- *   http://USER:PASS_country-XX_session-ID_lifetime-YY_streaming-1@host:port
+ * Returns [] when no candidate exists. Caller iterates and probes each
+ * candidate's proxy live before committing.
+ */
+function findFreshUpstreamCandidates() {
+  if (!fs.existsSync(UPSTREAM_LEDGER)) return [];
+  let lines;
+  try {
+    lines = fs.readFileSync(UPSTREAM_LEDGER, 'utf8').split('\n').filter(Boolean);
+  } catch (e) {
+    console.warn(`[upstream] could not read ledger ${UPSTREAM_LEDGER}: ${e.message}`);
+    return [];
+  }
+
+  // Walk in order so the LAST occurrence of each (ip, session) wins.
+  const byKey = new Map();
+  for (const line of lines) {
+    try {
+      const row = JSON.parse(line);
+      if (row && row.ip && row.session) byKey.set(consumedKey(row.ip, row.session), row);
+    } catch {
+      // Skip malformed lines.
+    }
+  }
+
+  const skip = readConsumedKeys(); // includes both successful consumptions and dead-marked rows
+  const now = Date.now();
+  const candidates = [];
+  for (const [key, row] of byKey) {
+    if (row.stale === true) continue;
+    const staleAtMs = safeParseDate(row.staleAt);
+    // Reject rows with missing or malformed staleAt — fail-closed; we can't
+    // tell if they're still valid.
+    if (!Number.isFinite(staleAtMs) || now > staleAtMs) continue;
+    const tsMs = safeParseDate(row.ts);
+    if (!Number.isFinite(tsMs)) continue;
+    if (skip.has(key)) continue;
+    if (!row.proxy || !row.proxy.host || !row.proxy.port || !row.proxy.login || !row.proxy.password) continue;
+    candidates.push({ row, tsMs });
+  }
+  // Freshest first.
+  candidates.sort((a, b) => b.tsMs - a.tsMs);
+  return candidates.map((c) => c.row);
+}
+
+/**
+ * Pings ipify through the given upstream row's proxy to confirm the proxy
+ * actually connects. Returns the IP reported by the proxy on success
+ * (which may differ from row.ip if the upstream session was reassigned).
+ * Returns null on any failure.
+ */
+async function probeUpstreamProxy(row, timeoutMs = 20_000) {
+  // buildProxyUrlFromRow throws on unsupported proxy types. Catching it here
+  // (rather than letting it propagate out of the for-loop in rotateAndGetIP)
+  // preserves skip-and-continue semantics across the candidate list.
+  let proxyUrl;
+  try {
+    proxyUrl = buildProxyUrlFromRow(row);
+  } catch (err) {
+    console.warn(`[upstream] skipping row ${row.ip} (session ${row.session}): ${err.message}`);
+    return null;
+  }
+  const agent = new HttpsProxyAgent(proxyUrl);
+  try {
+    const res = await axios.get('https://api.ipify.org?format=json', {
+      httpsAgent: agent, httpAgent: agent, proxy: false, timeout: timeoutMs,
+    });
+    const ip = res.data?.ip;
+    return ip || null;
+  } catch (err) {
+    const code = err.response?.status || err.code || 'unknown';
+    console.warn(`[upstream] probe failed for ${row.ip} (session ${row.session}): ${code}`);
+    return null;
+  }
+}
+
+function appendDeadUpstreamRow(row, reason) {
+  // Re-use the consumed-log file so dead rows are also skipped on next read;
+  // we mark `consumed_as` so future debugging can distinguish.
+  const dir = path.dirname(CONSUMED_LOG);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const entry = {
+    ts: new Date().toISOString(),
+    ip: row.ip,
+    session: row.session,
+    score: row.score,
+    country: row.country,
+    source: 'good-ip-finder',
+    consumed_as: 'dead_proxy',
+    reason,
+  };
+  try {
+    fs.appendFileSync(CONSUMED_LOG, JSON.stringify(entry) + '\n');
+  } catch (e) {
+    console.warn(`[upstream] could not record dead row: ${e.message}`);
+  }
+}
+
+function buildProxyUrlFromRow(row) {
+  const { type = 'http', host, port, login, password } = row.proxy;
+  // Callers (generate.js::buildProxyBlock) hardcode type:'http' when wiring the
+  // Dolphin proxy block, so a row tagged 'socks5' would build a socks5://
+  // URL here but be handed to Dolphin as if it were HTTP -- the browser
+  // would then silently fail to connect. Make the contract explicit instead.
+  if (type !== 'http' && type !== 'https') {
+    throw new Error(`[upstream] unsupported proxy type '${type}' for row ${row.ip}; only http/https are supported`);
+  }
+  return `${type}://${encodeURIComponent(login)}:${encodeURIComponent(password)}@${host}:${port}`;
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+function getCurrentSessionId() {
+  return currentSessionId;
+}
+
+/**
+ * Returns the proxy URL for the current session. When the last rotation
+ * consumed an upstream row, returns that row's verbatim URL (upstream creds
+ * may differ from this folder's env). Otherwise builds from env using the
+ * passed sessionId, the current session, or a freshly generated one.
  */
 function buildProxyUrl(sessionId) {
+  // If caller didn't pin a sessionId AND we just consumed an upstream row,
+  // return the upstream's URL.
+  if (currentUpstreamProxyUrl && (!sessionId || sessionId === currentSessionId)) {
+    return currentUpstreamProxyUrl;
+  }
+
   if (!IPROYAL_HOST || !IPROYAL_PORT || !IPROYAL_USERNAME || !IPROYAL_BASE_PASSWORD) {
     throw new Error(
-      '❌  Missing IPRoyal credentials in your .env file.\n' +
-      '    Make sure these are set:\n' +
-      '      IPROYAL_USERNAME      (e.g. G2Z51L88zI5TTRZg)\n' +
-      '      IPROYAL_BASE_PASSWORD (e.g. fVZQYtIcuAykqgcx  — just the part BEFORE "_country")\n' +
-      '      IPROYAL_HOST          (geo.iproyal.com)\n' +
-      '      IPROYAL_PORT          (12321)'
+      'Missing IPRoyal credentials in .env. Required: IPROYAL_USERNAME, ' +
+      'IPROYAL_BASE_PASSWORD, IPROYAL_HOST (geo.iproyal.com), IPROYAL_PORT (12321).'
     );
   }
 
@@ -73,27 +264,54 @@ function buildProxyUrl(sessionId) {
   return `http://${IPROYAL_USERNAME}:${encodeURIComponent(password)}@${IPROYAL_HOST}:${IPROYAL_PORT}`;
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-// ─── Public API ───────────────────────────────────────────────────────────────
-
 /**
- * Returns the session ID used in the last rotation (so vision.js can
- * use the same proxy session when creating the profile).
- */
-function getCurrentSessionId() {
-  return currentSessionId;
-}
-
-/**
- * Rotates the proxy by generating a NEW session ID, then discovers the
- * assigned IP by routing a check request through the new proxy.
- *
- * @returns {Promise<string>} The new IP address
+ * Get a fresh never-used IP for the next profile build. Tries the upstream
+ * ledger first; falls back to a fresh direct iproyal session if no upstream
+ * row is available.
  */
 async function rotateAndGetIP({ retries = 3 } = {}) {
+  // ── 1. Try upstream candidates, freshest first, probing each live ──────────
+  // Retry the probe a few times per candidate so a momentary hiccup doesn't
+  // permanently blacklist a curated row. Same backoff shape as the direct
+  // iproyal fallback below (1.5s on first retry, 4s after).
+  const candidates = findFreshUpstreamCandidates();
+  for (const row of candidates) {
+    let liveIp = null;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      liveIp = await probeUpstreamProxy(row);
+      if (liveIp) break;
+      if (attempt < retries) await sleep(attempt === 1 ? 1_500 : 4_000);
+    }
+    if (!liveIp) {
+      appendDeadUpstreamRow(row, `probe failed after ${retries} attempts`);
+      continue; // try next candidate
+    }
+    currentSessionId = row.session;
+    currentUpstreamProxyUrl = buildProxyUrlFromRow(row);
+    appendConsumed(row);
+    if (liveIp !== row.ip) {
+      console.log(
+        `📥  [upstream] consumed Good IP Finder row: ${row.ip} ` +
+        `(session ${row.session}, score ${row.score}, ${row.country}) ` +
+        `— note: live proxy returned ${liveIp}, the upstream session was reassigned`
+      );
+    } else {
+      console.log(
+        `📥  [upstream] consumed Good IP Finder row: ${row.ip} ` +
+        `(session ${row.session}, score ${row.score}, ${row.country})`
+      );
+    }
+    return liveIp;
+  }
+
+  // ── 2. Fall back to direct iproyal rotation ────────────────────────────────
+  if (candidates.length > 0) {
+    console.log(`[upstream] all ${candidates.length} candidate(s) failed live probe; falling through to direct iproyal`);
+  } else {
+    console.log('[upstream] no fresh row in ../Good IP Finder/output/index.jsonl; rotating direct iproyal session');
+  }
+  currentUpstreamProxyUrl = null;
+
   let lastErr;
   for (let attempt = 1; attempt <= retries; attempt++) {
     const newSessionId = generateSessionId();
