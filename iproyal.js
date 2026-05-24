@@ -213,6 +213,13 @@ function appendDeadUpstreamRow(row, reason) {
 
 function buildProxyUrlFromRow(row) {
   const { type = 'http', host, port, login, password } = row.proxy;
+  // Callers (generate.js::buildProxyBlock) hardcode type:'http' when wiring the
+  // Dolphin proxy block, so a row tagged 'socks5' would build a socks5://
+  // URL here but be handed to Dolphin as if it were HTTP -- the browser
+  // would then silently fail to connect. Make the contract explicit instead.
+  if (type !== 'http' && type !== 'https') {
+    throw new Error(`[upstream] unsupported proxy type '${type}' for row ${row.ip}; only http/https are supported`);
+  }
   return `${type}://${encodeURIComponent(login)}:${encodeURIComponent(password)}@${host}:${port}`;
 }
 
