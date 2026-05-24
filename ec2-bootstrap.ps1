@@ -68,8 +68,8 @@ function Clone-Repo {
   if (Test-Path $target) {
     Write-Host "[git] $DirName already cloned — pulling latest." -ForegroundColor Yellow
     Push-Location $target
-    git pull --ff-only
-    Pop-Location
+    try { git pull --ff-only }
+    finally { Pop-Location }
   } else {
     Write-Host "[git] cloning $RepoSlug -> $DirName" -ForegroundColor Green
     git clone "https://github.com/$RepoSlug.git" $target
@@ -83,8 +83,8 @@ Clone-Repo 'josephkhouryy/twilio-multi-account-creator'  'twilio-multi-account-c
 foreach ($d in @('good-ip-finder', 'hotmail-multi-creator', 'twilio-multi-account-creator')) {
   Write-Host "[npm] installing deps in $d" -ForegroundColor Green
   Push-Location (Join-Path $root $d)
-  npm install --no-audit --no-fund --loglevel=error
-  Pop-Location
+  try { npm install --no-audit --no-fund --loglevel=error }
+  finally { Pop-Location }
 }
 
 # ───── 3. Write .env files ─────
@@ -163,9 +163,18 @@ function Write-LoopScript {
 Write-LoopScript 'start-ip-finder' @'
 $ErrorActionPreference = "Stop"
 $dir = Join-Path $env:USERPROFILE "good-ip-finder"
-Push-Location $dir
 Write-Host "[ip-finder] starting in $dir" -ForegroundColor Cyan
-node "Good IP finder.js"
+# The node script loops internally (publishes IPs, sleeps when pool full).
+# Wrap it in a PowerShell while-loop for resilience: if the node process
+# crashes (OOM, segfault, uncaught exception), restart it after a short
+# back-off so the Twilio loop's IP-pool guard doesn't sit idle forever.
+while ($true) {
+  Push-Location $dir
+  try { node "Good IP finder.js" }
+  catch { Write-Host " [ip-finder] node exited with error: $_ — restarting in 60s" -ForegroundColor Red }
+  finally { Pop-Location }
+  Start-Sleep 60
+}
 '@
 
 Write-LoopScript 'start-hotmail-loop' @'
