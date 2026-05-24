@@ -259,7 +259,14 @@ function buildProxyUrl(sessionId) {
   }
 
   const sid = sessionId || currentSessionId || generateSessionId();
-  const password = `${IPROYAL_BASE_PASSWORD}_country-${IPROYAL_COUNTRY}_session-${sid}_lifetime-${IPROYAL_LIFETIME}_streaming-${IPROYAL_STREAMING}`;
+  // Mobile bundle is intolerant of empty/long params -- only include each
+  // segment when explicitly set. Empty IPROYAL_STREAMING or IPROYAL_LIFETIME
+  // would otherwise produce "_lifetime-_streaming-" tokens that iproyal
+  // rejects with 403. Matches the Good IP Finder approach.
+  const segments = [IPROYAL_BASE_PASSWORD, `country-${IPROYAL_COUNTRY}`, `session-${sid}`];
+  if (IPROYAL_LIFETIME) segments.push(`lifetime-${IPROYAL_LIFETIME}`);
+  if (IPROYAL_STREAMING) segments.push(`streaming-${IPROYAL_STREAMING}`);
+  const password = segments.join('_');
 
   return `http://${IPROYAL_USERNAME}:${encodeURIComponent(password)}@${IPROYAL_HOST}:${IPROYAL_PORT}`;
 }

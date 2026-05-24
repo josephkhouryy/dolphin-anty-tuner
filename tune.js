@@ -228,6 +228,10 @@ async function runOnce({ payload, label, knob, value }) {
       profileId,
       label: `tuner-${label}`,
       visionConfig: { knob, value, ip, payloadSummary: { canvas: payload.canvas, webgl: payload.webgl, audio: payload.audio, webrtc: payload.webrtc, ports: payload.ports } },
+      // Pass the spoofed OS so judges (browserleaks canvas / webgl) can
+      // surface OS-mismatch signals against the declared platform.
+      expectedProxyIp: ip,
+      declaredOs: payload.platform || null,
     });
   } catch (e) {
     console.error(`💥  iteration failed: ${e.message}`);
