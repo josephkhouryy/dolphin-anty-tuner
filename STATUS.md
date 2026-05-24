@@ -23,8 +23,5 @@ Restart with the new code (PUBLISH_THRESHOLD support + index.jsonl writes). Same
 - **bot detection**: One earlier iteration flagged Playwright/CDP as `nodriver`. Sporadic; not a stable problem yet.
 - **ip_blocklist**: IPRoyal IPs sometimes flagged "residential proxy provider". Once `../Good IP Finder/output/` has fraud_score=0 IPs, switch to consuming from there.
 
-## Chain wiring
-This subproject currently calls IPRoyal directly via `iproyal.js`. The chain pattern (consume from `../Good IP Finder/output/`) is NOT yet wired -- the open strategic question in PROJECTS.md hasn't been resolved by Joe. Code is internally ready: `persistGoodProfile()` writes one file per artifact + a row in `output/index.jsonl` so downstream can tail.
-
 ## Code knobs available
 canvas, webgl, audio, clientRect, mediaDevices (noise/real); webrtc (altered/real/disabled); ports (protect/real); doNotTrack (true/false). See `generate.js -> KNOBS`.
