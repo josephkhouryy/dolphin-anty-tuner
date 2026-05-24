@@ -17,7 +17,6 @@ const URL = 'https://pixelscan.net/';
 async function extractPixelscanVerdict(page) {
   return page.evaluate(() => {
     const text = document.body.innerText || '';
-    const lower = text.toLowerCase();
 
     const positive = /(consistent|looks legit|passed|no inconsistencies|real browser)/i.test(text);
     const negative = /(modified browser|masking detected|inconsistent|anti[- ]detect|spoof|fingerprint masking|automation detected|bot detected)/i.test(text);
@@ -29,6 +28,8 @@ async function extractPixelscanVerdict(page) {
     if (/modified browser/i.test(text)) detectedFlags.push('modified');
     if (/automation detected/i.test(text)) detectedFlags.push('automation');
     if (/bot detected/i.test(text)) detectedFlags.push('bot');
+    if (/\bspoof/i.test(text)) detectedFlags.push('spoof');
+    if (/fingerprint masking/i.test(text)) detectedFlags.push('fingerprint_masking');
 
     return {
       positive_phrase: positive,
