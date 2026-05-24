@@ -20,9 +20,6 @@ The continuous producer (`produce/produce.js`) honors `PRODUCE_PUBLISH_THRESHOLD
 ## Next-run plan
 Restart with the new code (publish-at-threshold + parent-events). Each iteration that scores >=80 publishes to output/ -- the pool should fill from the first FP-clean iteration on. Continuous loop runs until upstream IP pool is exhausted or Joe stops it.
 
-## PR #6 -- blocked on Greptile trial limit (2026-05-24)
-PR #6 (https://github.com/josephkhouryy/dolphin-anty-tuner/pull/6) carries the publish-at-threshold gate, parent events.jsonl writes, and an `anti_detect_browser=true` hard-reject. It is the final piece of chain wiring -- without it the pool stays at 0 (per the merged PR #5 the gate is `pass_all`, which never holds because non-fp judges fail on proxy-network errors). The PR is mergeable but Greptile returned "50-review trial limit reached on josephkhouryy account" so the strict Greptile gate from CLAUDE.md is unsatisfiable. Awaiting Joe's strategic call: upgrade Greptile, or explicitly override the gate for this one PR so the chain can flow.
-
 ## Known blockers / open problems
 - **virtual_machine signal**: FP.com's VM detection trips on EC2 hardware (likely WebGL2Maximum constants or specific D3D11 vendor signature). Likely irreducible from inside Dolphin's config knob set.
 - **bot detection**: One earlier iteration flagged Playwright/CDP as `nodriver`. Sporadic; not a stable problem yet.

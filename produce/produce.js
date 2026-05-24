@@ -36,7 +36,19 @@ const ERROR_BACKOFF_MS = parseInt(process.env.PRODUCE_ERROR_BACKOFF_MS || '5000'
 //     non-fp judges (CreepJS, Pixelscan, sannysoft, browserleaks) often fail
 //     for proxy-network reasons (ERR_CONNECTION_CLOSED) that don't reflect
 //     profile quality, so gating publication on pass_all dries up the pool.
-const PUBLISH_THRESHOLD = parseInt(process.env.PRODUCE_PUBLISH_THRESHOLD || '80', 10);
+// parseInt('abc', 10) returns NaN, and `n >= NaN` is always false -- so a
+// non-numeric override would silently block every publication with no signal
+// at all. Warn + fall back to the default 80 when the env var is unparseable.
+const PUBLISH_THRESHOLD = (() => {
+  const raw = process.env.PRODUCE_PUBLISH_THRESHOLD;
+  if (raw === undefined || raw === '') return 80;
+  const v = parseInt(raw, 10);
+  if (Number.isNaN(v)) {
+    console.warn(`PRODUCE_PUBLISH_THRESHOLD="${raw}" is not a number; using default 80`);
+    return 80;
+  }
+  return v;
+})();
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -326,8 +338,15 @@ async function runOnce(iter) {
         });
         console.log(`PUBLISHED ${file}  (score=${totalScore}, pass_all=${!!benchResult.pass_all})`);
       } catch (e) {
+        // Surface persist failures distinctly. `persist_error` keeps the raw
+        // message; setting `attempt.error` too is what makes the parent
+        // events.jsonl row classify as `iter_error` instead of the default
+        // `iter_rejected` -- without this a disk-full / permissions failure
+        // would be indistinguishable from a routine score-gate rejection in
+        // the coordinator's event tail.
         console.error(`persistGoodProfile failed: ${e.message}`);
         attempt.persist_error = e.message;
+        attempt.error = `persist:${e.message}`;
         attempt.published = false;
       }
     } else {
