@@ -228,6 +228,17 @@ async function runOnce({ payload, label, knob, value }) {
       profileId,
       label: `tuner-${label}`,
       visionConfig: { knob, value, ip, payloadSummary: { canvas: payload.canvas, webgl: payload.webgl, audio: payload.audio, webrtc: payload.webrtc, ports: payload.ports } },
+      // Two new params plumbed through to the bench's judges:
+      //   expectedProxyIp -- switches browserleaks/judgeWebRTC from the
+      //     loose `multi_public_ip` check to a targeted IP-leak check
+      //     (publicIps.filter(ip => ip !== expectedProxyIp)). Before this
+      //     change the judge ran with null and double-counted the proxy IP
+      //     as a leak.
+      //   declaredOs      -- lets browserleaks/canvas + webgl surface
+      //     OS-mismatch signals against the declared platform (e.g. canvas
+      //     guess "Mac" while declared "windows").
+      expectedProxyIp: ip,
+      declaredOs: payload.platform || null,
     });
   } catch (e) {
     console.error(`💥  iteration failed: ${e.message}`);

@@ -18,54 +18,99 @@ const TRUST_THRESHOLD = 60;
 async function extractCreepjsVerdict(page) {
   return page.evaluate(() => {
     const text = document.body.innerText || '';
-    // Trust score appears as "60% trust" or "trust score X%" or "X.X% (Y)".
+
+    // CreepJS renders the trust % in a fixed banner at the top of the
+    // results: `"<grade>" <NN>% (NN.NN/100)`. Examples seen in the wild:
+    //   "F  20% (20/100)"          -- single-letter grade + space + percent
+    //   "A   97% (97.50/100)"
+    //   "<grade>: 84% trust"       (older format)
+    //   "trust score: 60%"
+    // Anchor to the "/100" companion or to "trust" so we don't accidentally
+    // grab `99.99%` from "99.99% (6 of 298939...)" further down.
     const trustMatch =
+      text.match(/(-?\d+(?:\.\d+)?)\s*%\s*\(\s*-?\d+(?:\.\d+)?\s*\/\s*100\s*\)/) ||
       text.match(/(-?\d+(?:\.\d+)?)\s*%\s*trust/i) ||
-      text.match(/trust\s*score[^\d-]*(-?\d+(?:\.\d+)?)\s*%/i) ||
-      text.match(/(-?\d+(?:\.\d+)?)\s*%\s*\(\s*\d+\s*\)/);
+      text.match(/trust\s*score[^\d-]*(-?\d+(?:\.\d+)?)\s*%/i);
     const trust = trustMatch ? Number(trustMatch[1]) : null;
 
-    // Lies count: "lies (N)" or "N lies" header.
+    // Lies count: "lies (N)" or "N lies" header. The block prints as
+    // "lies (4)" right above the per-lie list.
     const liesMatch =
       text.match(/lies\s*\(\s*(\d+)\s*\)/i) ||
-      text.match(/(\d+)\s+lies/i);
+      text.match(/(\d+)\s+lies\b/i);
     const lies = liesMatch ? Number(liesMatch[1]) : null;
 
-    // Bot/automation/headless tags surfaced in the result block.
-    // CreepJS prints each attribute as a labelled row even when the value is
-    // negative ("Headless Browser: Not Detected"), so bare-keyword regexes
-    // would flag every page. For each keyword we walk ALL occurrences in the
-    // page text and inspect a 120-char window after each one (crossing
-    // newlines, because innerText puts label and value on separate lines when
-    // they live in different DOM cells). A tag is pushed when ANY occurrence
-    // shows a positive-detection phrase AND no negation in the same span --
-    // a single negative line elsewhere on the page shouldn't mask a real
-    // positive verdict further down.
+    // CreepJS publishes a dedicated "Headless" block whose lines read like
+    //   "Headless<hash>
+    //    chromium: true
+    //    31% like headless: <hash>
+    //    33% headless: <hash>
+    //    20% stealth: <hash>"
+    // The classifiers ALWAYS render with "true/false" for chromium and a
+    // numeric % for the headless/stealth detectors -- a value at or above
+    // 50% on either of "headless" or "stealth" is the strong positive.
+    // Below 50% the page is saying "I see no automation tells", even though
+    // the rows still contain the literal word "headless". The old parser
+    // matched on the word alone and reported `tag:headless` on every probe.
     const automationTags = [];
-    const positiveNear = (kw) => {
-      const re = new RegExp(`${kw}[\\s\\S]{0,120}`, 'gi');
-      let m;
-      while ((m = re.exec(text)) !== null) {
-        const span = m[0];
-        // `\bnot\b` (not bare `\bno\b`) -- "no" matches incidentally on text
-        // like "No other automation flags" which sits well past the actual
-        // verdict and would silently swallow a real detection. `\bnot\b` still
-        // catches "not detected" / "not headless" without that false drop.
-        if (/not\s+detected|\bfalse\b|\bnot\b|negative/i.test(span)) continue;
-        if (/\btrue\b|\byes\b|\bdetected\b|positive/i.test(span)) return true;
-      }
-      return false;
+    let headlessSignals = null;
+    // Require AT LEAST ONE hex char ([0-9a-f]+, not [0-9a-f]*) so the regex
+    // anchors only on the real "Headless<hash>" block header. With * the
+    // pattern can match any line that ends with the bare word "headless"
+    // (e.g. an explanatory row whose innerText is "...headless\n"), and
+    // text.match() returns the FIRST match, so the captured block would
+    // contain unrelated content and headlessClass would be null -- silently
+    // suppressing real headless detection.
+    const headlessBlockMatch = text.match(/Headless[0-9a-f]+\s*\n([\s\S]{0,400})/i);
+    if (headlessBlockMatch) {
+      const block = headlessBlockMatch[1];
+      const headlessPct = (block.match(/(\d+(?:\.\d+)?)\s*%\s*headless/i) || [])[1];
+      const stealthPct = (block.match(/(\d+(?:\.\d+)?)\s*%\s*stealth/i) || [])[1];
+      const likePct = (block.match(/(\d+(?:\.\d+)?)\s*%\s*like\s+headless/i) || [])[1];
+      const headlessClass = headlessPct ? Number(headlessPct) : null;
+      const stealthClass = stealthPct ? Number(stealthPct) : null;
+      const likeClass = likePct ? Number(likePct) : null;
+      // Only flag when CreepJS's own classifier confidently says yes.
+      // 75%+ is the project's published threshold for a hard positive.
+      if (headlessClass != null && headlessClass >= 75) automationTags.push('headless');
+      if (stealthClass != null && stealthClass >= 75) automationTags.push('stealth');
+      headlessSignals = {
+        chromium: /chromium:\s*true/i.test(block),
+        headlessClass,
+        stealthClass,
+        likeClass,
+      };
+    }
+    // Webdriver row -- CreepJS renders it as "Webdriver<hash>\nfalse\n" when
+    // the flag is hidden by the stealth layer. Only flag when it's "true".
+    // `[0-9a-f]+` (not `*`) so we only match the real block header, not a
+    // bare "webdriver" word elsewhere.
+    if (/Webdriver[0-9a-f]+\s*\n\s*true\b/i.test(text)) automationTags.push('webdriver');
+
+    // Fingerprint ID at the top of the page: "FP ID: <64-char hex>".
+    const fpHash = (text.match(/FP\s*ID[:\s]+([0-9a-f]{12,})/i)
+      || text.match(/fingerprint\s*([0-9a-f]{12,})/i)
+      || [])[1] || null;
+
+    // The "Lies" block, when present, looks like:
+    //   "Lies<hash>
+    //    lies (N)
+    //    <list of lies>"
+    // -- but `Lies\s*\(\s*\d+\s*\)` is rarely the layout. Try harder:
+    let liesFromBlock = null;
+    if (lies == null) {
+      const liesBlockMatch = text.match(/\bLies[0-9a-f]+\s*\n\s*(\d+)\s/i);
+      if (liesBlockMatch) liesFromBlock = Number(liesBlockMatch[1]);
+    }
+
+    return {
+      trust,
+      lies: lies != null ? lies : liesFromBlock,
+      automationTags,
+      headlessSignals,
+      fpHash,
+      sample: text.slice(0, 3000),
     };
-    if (positiveNear('headless')) automationTags.push('headless');
-    if (positiveNear('automation')) automationTags.push('automation');
-    if (positiveNear('webdriver')) automationTags.push('webdriver');
-    if (positiveNear('puppet')) automationTags.push('puppeteer');
-    if (positiveNear('playwright')) automationTags.push('playwright');
-
-    // Fingerprint hash (informational).
-    const fpHash = (text.match(/fingerprint\s*([0-9a-f]{12,})/i) || [])[1] || null;
-
-    return { trust, lies, automationTags, fpHash, sample: text.slice(0, 1200) };
   });
 }
 

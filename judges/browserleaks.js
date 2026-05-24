@@ -27,8 +27,35 @@ async function extractSubpageData(page, id) {
     const text = document.body.innerText || '';
 
     if (id === 'webrtc') {
-      const ipv4s = Array.from(text.matchAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)).map(m => m[0])
-        .filter(ip => !ip.startsWith('0.') && !ip.startsWith('127.') && !ip.startsWith('255.'));
+      // browserleaks.com/webrtc explicitly prints the WebRTC verdict line
+      // ("WebRTC Leak Test  ✔ No Leak" or "... ✖ Leaked"). Trust that
+      // verdict first; only fall through to ICE-candidate IP scanning when
+      // the line is missing.
+      //
+      // The page also lists the proxy IP twice ("Your Remote IP" and
+      // "Public IP Address") and the old text-wide regex counted the same
+      // IP twice and reported `multi_public_ip=2` as a leak. Anchor the
+      // scrape to the SDP Log block instead -- ICE candidates only appear
+      // inside the m=audio / a=candidate lines, never in the prose above.
+      // Anchor below the "Your WebRTC IP" subheader so we don't read the
+      // nav-menu link that also contains "WebRTC Leak Test".
+      const resultStart = text.search(/Your\s+WebRTC\s+IP/i);
+      const scanFrom = resultStart >= 0 ? text.slice(resultStart, resultStart + 800) : text;
+      // Skip the leading "✔" / "✖" icon line; the verdict ("No Leak" /
+      // "Leaked") is on the second line after the label.
+      const leakStatus = (scanFrom.match(/WebRTC\s+Leak\s+Test\s*\n+[^\n]*\n+\s*([A-Za-z][^\n]+)/i)
+        || scanFrom.match(/WebRTC\s+Leak\s+Test[^\n]*\n+\s*([A-Za-z][^\n]+)/i)
+        || [])[1] || null;
+      const leakSummary = leakStatus ? leakStatus.trim() : null;
+
+      // Pull IPs ONLY from inside the SDP Log block (lines that start with
+      // "candidate:..."). Anything outside is page chrome.
+      const sdpStart = text.indexOf('SDP Log');
+      const sdpBlock = sdpStart >= 0 ? text.slice(sdpStart, sdpStart + 4000) : '';
+      const candidateIps = Array.from(sdpBlock.matchAll(/candidate:\d+\s+\d+\s+\w+\s+\d+\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g))
+        .map(m => m[1]);
+      // Dedupe -- the same IP appearing across host/srflx candidates is one IP.
+      const ipv4s = Array.from(new Set(candidateIps));
       const localIps = ipv4s.filter(ip =>
         ip.startsWith('10.') ||
         ip.startsWith('192.168.') ||
@@ -36,24 +63,63 @@ async function extractSubpageData(page, id) {
         /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
       );
       const publicIps = ipv4s.filter(ip => !localIps.includes(ip));
-      return { kind: 'webrtc', ipv4s, localIps, publicIps, sample: text.slice(0, 1200) };
+      return { kind: 'webrtc', leakSummary, ipv4s, localIps, publicIps, sample: text.slice(0, 1200) };
     }
 
     if (id === 'webgl') {
-      const vendor = (text.match(/Unmasked Vendor\s*\n+\s*([^\n]+)/i) || text.match(/Vendor\s*\n+\s*([^\n]+)/i) || [])[1] || null;
-      const renderer = (text.match(/Unmasked Renderer\s*\n+\s*([^\n]+)/i) || text.match(/Renderer\s*\n+\s*([^\n]+)/i) || [])[1] || null;
-      return { kind: 'webgl', vendor: vendor?.trim() || null, renderer: renderer?.trim() || null, sample: text.slice(0, 1200) };
+      // browserleaks renders the unmasked-vendor/renderer rows as:
+      //   "Unmasked Vendor\n!\nGoogle Inc. (AMD)"
+      // where the "!" is a tooltip icon. The old regex grabbed "!" instead
+      // of the real value. Skip any single-char "!" line, plus any line
+      // that's purely whitespace, and grab the first non-trivial line after
+      // the label. Also recognise "WebGL Vendor" / "WebGL Renderer".
+      const grabAfter = (label) => {
+        const re = new RegExp(label + '\\s*((?:\\n+[^\\n]*){0,6})', 'i');
+        const m = text.match(re);
+        if (!m) return null;
+        const lines = m[1].split('\n').map(s => s.trim()).filter(s => s && s !== '!' && s !== '?' && s !== '✔' && s !== '✖');
+        // First non-trivial line is the value; anything starting with
+        // another label-looking row ends the field.
+        const stop = /^(Unmasked|Vendor|Renderer|GL Version|Shading|WebGL|Antialias|Debug|HTTP)/i;
+        for (const line of lines) {
+          if (stop.test(line)) break;
+          return line;
+        }
+        return null;
+      };
+      const vendor = grabAfter('Unmasked Vendor') || grabAfter('WebGL Vendor');
+      const renderer = grabAfter('Unmasked Renderer') || grabAfter('WebGL Renderer');
+      return { kind: 'webgl', vendor: vendor || null, renderer: renderer || null, sample: text.slice(0, 1200) };
     }
 
     if (id === 'canvas') {
-      const hash = (text.match(/Signature\s*\n+\s*([A-Za-z0-9]+)/i) || text.match(/Hash\s*\n+\s*([A-Za-z0-9]+)/i) || [])[1] || null;
-      const uniq = (text.match(/Uniqueness[^\n]*\n+\s*([^\n]+)/i) || [])[1] || null;
-      return { kind: 'canvas', hash, uniqueness: uniq?.trim() || null, sample: text.slice(0, 1200) };
+      // Page format: "Canvas Fingerprint\nSignature\n<HEX>\nUniqueness\n<text>".
+      // The old regex was `Signature\s*\n+\s*([A-Za-z0-9]+)` which also
+      // matches the "Signature Stats" header further down (where the value
+      // is the prose "It's very likely..."). Anchor to a hex-only token at
+      // least 16 chars long to avoid prose. Same fix on Uniqueness -- it's
+      // a line of prose ("99.99% (6 of 298939 user agents...)").
+      const sigBlock = text.match(/Canvas Fingerprint\s*\n+\s*Signature\s*\n+\s*([0-9A-Fa-f]{16,})/);
+      const hash = sigBlock ? sigBlock[1] : (text.match(/\bSignature\s*\n+\s*([0-9A-Fa-f]{16,})/) || [])[1] || null;
+      const uniq = (text.match(/Uniqueness\s*\n+\s*([^\n]+)/i) || [])[1] || null;
+      // Canvas page also outs the OS guess when running on a spoofed UA --
+      // "It's very likely that your web browser is Chrome and your operating
+      // system is <Mac|Windows|Linux>". This is the canvas-driven OS-leak
+      // signal that fp.com translates into tampering=true. Surface it so the
+      // judge can pass-or-fail on it directly.
+      const osGuess = (text.match(/operating system is\s+([A-Za-z]+)/i) || [])[1] || null;
+      const browserGuess = (text.match(/web browser is\s+([A-Za-z]+)/i) || [])[1] || null;
+      return { kind: 'canvas', hash, uniqueness: uniq?.trim() || null, osGuess, browserGuess, sample: text.slice(0, 1200) };
     }
 
     if (id === 'fonts') {
-      const count = (text.match(/(\d+)\s+fonts\s+detected/i) || text.match(/Detected\s+Fonts[^\d]*(\d+)/i) || [])[1];
-      return { kind: 'fonts', count: count ? Number(count) : null, sample: text.slice(0, 1200) };
+      // Current page wording: "Report\n460 fonts and 306 unique metrics found"
+      // Plus an old fallback that said "X fonts detected".
+      const m = text.match(/(\d+)\s+fonts\s+and\s+\d+\s+unique\s+metrics\s+found/i)
+            || text.match(/(\d+)\s+fonts\s+detected/i)
+            || text.match(/Detected\s+Fonts[^\d]*(\d+)/i);
+      const count = m ? Number(m[1]) : null;
+      return { kind: 'fonts', count, sample: text.slice(0, 1200) };
     }
 
     return { kind: id, sample: text.slice(0, 1200) };
@@ -63,8 +129,18 @@ async function extractSubpageData(page, id) {
 function judgeWebRTC(data, expectedProxyIp, opts = {}) {
   if (!data) return ['webrtc:no_data'];
   const reasons = [];
+
+  // Prefer the page's own verdict line ("WebRTC Leak Test  ✔ No Leak" /
+  // "... ✖ Leaked"). A "No Leak" reading is authoritative -- skip the
+  // ICE-IP scan in that case so we don't double-count.
+  const lineLower = (data.leakSummary || '').toLowerCase();
+  if (lineLower.includes('no leak')) return reasons;
+  if (lineLower.includes('leaked') || lineLower.includes('leak detected')) {
+    reasons.push(`webrtc:page_says_leaked`);
+  }
+
   if (expectedProxyIp) {
-    const leaks = data.publicIps.filter(ip => ip !== expectedProxyIp);
+    const leaks = (data.publicIps || []).filter(ip => ip !== expectedProxyIp);
     if (leaks.length) reasons.push(`webrtc:leak=${leaks.slice(0, 3).join(',')}`);
   } else {
     if ((data.publicIps || []).length > 1) reasons.push(`webrtc:multi_public_ip=${data.publicIps.length}`);
@@ -94,9 +170,29 @@ function judgeWebGL(data, declaredOs) {
   return reasons;
 }
 
-function judgeCanvas(data) {
+function judgeCanvas(data, declaredOs) {
   if (!data) return ['canvas:no_data'];
   if (!data.hash) return ['canvas:no_hash'];
+  // The canvas page prints its own OS/browser guess derived from rendering
+  // signatures ("It's very likely that your web browser is Chrome and your
+  // operating system is Mac"). When that guess disagrees with the declared
+  // OS we're spoofing, fp.com flips `tampering=true`. Surface the mismatch
+  // explicitly so the tuner sees it.
+  if (declaredOs && data.osGuess) {
+    const declared = declaredOs.toLowerCase();
+    const guessed = data.osGuess.toLowerCase();
+    const normDeclared = declared.includes('win') ? 'windows'
+      : declared.includes('mac') ? 'mac'
+      : declared.includes('linux') ? 'linux'
+      : declared;
+    const normGuessed = guessed.includes('win') ? 'windows'
+      : guessed.includes('mac') ? 'mac'
+      : guessed.includes('linux') ? 'linux'
+      : guessed;
+    if (normDeclared !== normGuessed) {
+      return [`canvas:os_mismatch_declared=${normDeclared}_canvas_says=${normGuessed}`];
+    }
+  }
   return [];
 }
 
@@ -131,7 +227,7 @@ async function judge({
       sout.data = await extractSubpageData(page, sub.id);
       if (sub.id === 'webrtc') reasons.push(...judgeWebRTC(sout.data, expectedProxyIp, webrtcOpts));
       else if (sub.id === 'webgl') reasons.push(...judgeWebGL(sout.data, declaredOs));
-      else if (sub.id === 'canvas') reasons.push(...judgeCanvas(sout.data));
+      else if (sub.id === 'canvas') reasons.push(...judgeCanvas(sout.data, declaredOs));
       else if (sub.id === 'fonts') reasons.push(...judgeFonts(sout.data));
     } catch (e) {
       sout.error = e.message;
