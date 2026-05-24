@@ -31,8 +31,13 @@ async function extractSannysoftVerdict(page) {
       return { label, verdictCells, anyFailed, anyPassed };
     }).filter(Boolean);
 
-    const failedRows = results.filter(r => r.anyFailed).map(r => r.label);
     const webdriverRow = results.find(r => /webdriver/i.test(r.label));
+    // Exclude the WebDriver row from the generic failed-list: the caller
+    // surfaces it separately as `webdriver_failed`, so leaving it in here
+    // produces duplicate reasons (`webdriver_failed | failed:WebDriver`).
+    const failedRows = results
+      .filter(r => r.anyFailed && r !== webdriverRow)
+      .map(r => r.label);
 
     return {
       total: results.length,
